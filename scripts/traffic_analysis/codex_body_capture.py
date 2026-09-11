@@ -2,7 +2,7 @@
 
 One command. No ChatGPT credentials, no quota, no network egress:
 
-    python scripts/traffic_analysis/codex_body_capture.py \
+    uv run python -m scripts.traffic_analysis.codex_body_capture \
       --model gpt-5.5 --model gpt-5.6-sol --transport http \
       --out /mnt/scratch/tmp/codex-body-capture-$(date -u +%Y%m%d)
 
@@ -18,8 +18,14 @@ How it stays isolated:
   or if the environment carries any production/proxy variable.
 * **Captured in the origin, not in a proxy.** The loopback origin receives
   plaintext HTTP and persists the decoded request bytes itself, reusing
-  ``origin_fixture.decode_request_body``. No TLS, no mitmproxy addon, no
-  ``uv``.
+  ``origin_fixture.decode_request_body``. No TLS, no mitmproxy addon and no
+  ``uvx`` capture boundary -- the parity lane's three moving parts.
+
+It does need the project environment, which is what ``uv run`` above supplies:
+the origin is FastAPI plus uvicorn, and the request decoder is ``zstandard``.
+A bare interpreter fails at import, and on many hosts ``python`` is not even a
+command. Nothing here needs the application configured, only importable: this
+module reads no settings and touches no database.
 
 Why the catalog must be pinned: the Codex model manager invalidates its cache
 on a ``client_version`` mismatch and caches for 300 s, so a capture run always
@@ -454,6 +460,24 @@ def _build_origin(
     return app, captured
 
 
+def reexec_environment(environment: Mapping[str, str], *, repo_root: Path = REPO_ROOT) -> dict[str, str]:
+    """The re-exec child's environment: this repository first on the import path.
+
+    The child is started by file path, so its ``sys.path[0]`` is the script's own
+    directory and an installed copy of this project in ``site-packages`` wins the
+    ``scripts.traffic_analysis`` import -- silently running another checkout's
+    origin, or failing outright when the two differ. Pinning the repository that
+    was actually launched makes the documented ``python -m`` invocation behave
+    the same after the namespace re-exec as before it.
+    """
+
+    child = dict(environment)
+    child[REEXEC_MARKER] = "1"
+    existing = child.get("PYTHONPATH")
+    child["PYTHONPATH"] = f"{repo_root}{os.pathsep}{existing}" if existing else str(repo_root)
+    return child
+
+
 def _reexec_in_network_namespace(argv: Sequence[str]) -> int:
     """Re-run this script with loopback as the only reachable network."""
 
@@ -476,9 +500,7 @@ def _reexec_in_network_namespace(argv: Sequence[str]) -> int:
         str(Path(__file__).resolve()),
         *argv,
     ]
-    environment = dict(os.environ)
-    environment[REEXEC_MARKER] = "1"
-    return subprocess.run(command, env=environment, check=False).returncode
+    return subprocess.run(command, env=reexec_environment(os.environ), check=False).returncode
 
 
 def _serve(app: Any, port: int) -> tuple[Any, threading.Thread]:
@@ -696,7 +718,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         atomic_write_json(destination / "manifest.json", manifest)
         print(f"wrote: {destination}/{{body,headers}}-*.json, manifest.json")
         print(
-            "next: python scripts/traffic_analysis/codex_body_sanitize.py "
+            "next: uv run python -m scripts.traffic_analysis.codex_body_sanitize "
             f"--in {destination}/body-<slug>-<transport>-<stamp>.json --out <fixture>.json"
         )
         return 0 if all(run.get("body") for run in runs) else 1

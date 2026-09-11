@@ -209,7 +209,7 @@ parity capture above, because the body is recorded *in the origin* rather than
 at a TLS boundary:
 
 ```bash
-python scripts/traffic_analysis/codex_body_capture.py \
+uv run python -m scripts.traffic_analysis.codex_body_capture \
   --model gpt-5.5 --model gpt-5.6-sol --transport http \
   --out /mnt/scratch/tmp/codex-body-capture-$(date -u +%Y%m%d)
 ```
@@ -224,6 +224,12 @@ and a disposable `env_key` token. The origin persists the decoded request bytes
 itself, reusing `origin_fixture.decode_request_body` for the zstd request
 encoding, so no mitmproxy addon, TLS endpoint or `capture_body_mode` is
 involved.
+
+All three commands in this section run through `uv run`, like the origin fixture
+above, because they import FastAPI, uvicorn and `zstandard` from the project
+environment. A bare system interpreter fails at import — and on many hosts
+`python` is not a command at all. None of them needs codex-lb *configured*: they
+read no settings and touch no database.
 
 `--transport websocket` sets `supports_websockets = true` on the generated
 provider and the origin serves both transports, because the configuration only
@@ -276,14 +282,14 @@ text, skills inventory, prompt — to whatever host the variable names.
 Then sanitise and gate the result before committing it:
 
 ```bash
-python scripts/traffic_analysis/codex_body_sanitize.py \
+uv run python -m scripts.traffic_analysis.codex_body_sanitize \
   --in  <capture-dir>/body-gpt-5.5-http-<stamp>.json \
   --out tests/fixtures/codex_bodies/<name>.json \
   --headers-in  <capture-dir>/headers-gpt-5.5-http-<stamp>.json \
   --headers-out <capture-dir>/sanitised-headers.json \
   --emit-redactions <capture-dir>/redactions.json
 
-python scripts/traffic_analysis/fixture_privacy_scan.py \
+uv run python -m scripts.traffic_analysis.fixture_privacy_scan \
   --root tests/fixtures/codex_bodies --strict
 ```
 

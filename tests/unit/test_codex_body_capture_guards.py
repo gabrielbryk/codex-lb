@@ -5,11 +5,13 @@ what it must guarantee is that every refusal fires *before* a process starts,
 because the whole safety argument of the lane ("no credentials, no upstream, no
 quota") rests on those preconditions rather than on operator discipline.
 
-Each guard gets a positive case and a refusing case.
+Each guard gets a positive case and a refusing case. The origin the run starts
+is covered next door, in ``test_codex_body_capture_origin.py``.
 """
 
 from __future__ import annotations
 
+import os
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -24,6 +26,7 @@ from scripts.traffic_analysis.codex_body_capture import (
     FORBIDDEN_ENVIRONMENT_VARIABLES,
     FORBIDDEN_PROXY_ENVIRONMENT_VARIABLES,
     PROVIDER_NAME,
+    REEXEC_MARKER,
     REPO_ROOT,
     CaptureRefusal,
     CaptureTarget,
@@ -39,6 +42,7 @@ from scripts.traffic_analysis.codex_body_capture import (
     capture_config_toml,
     capture_environment,
     preflight,
+    reexec_environment,
 )
 
 pytestmark = pytest.mark.unit
@@ -313,6 +317,23 @@ def test_the_child_environment_never_inherits_an_outbound_proxy_variable(tmp_pat
 
     assert [name for name in child if name.casefold().endswith("_proxy")] == []
     assert_clean_environment(child)
+
+
+def test_the_namespace_reexec_keeps_this_repository_first_on_the_import_path() -> None:
+    """The child is started by file path, so ``site-packages`` would otherwise win.
+
+    With an installed copy of this project on the path, the re-exec imported
+    *that* checkout's ``scripts.traffic_analysis.origin_fixture`` and died with
+    ``ImportError: cannot import name 'decode_request_body'`` -- the documented
+    ``python -m`` invocation working before the re-exec and failing after it.
+    """
+
+    pinned = reexec_environment({"PATH": "/usr/bin"})
+    appended = reexec_environment({"PYTHONPATH": "/elsewhere"})
+
+    assert pinned["PYTHONPATH"] == str(REPO_ROOT)
+    assert appended["PYTHONPATH"] == f"{REPO_ROOT}{os.pathsep}/elsewhere"
+    assert pinned[REEXEC_MARKER] == "1" and appended[REEXEC_MARKER] == "1"
 
 
 def test_the_body_summary_reports_the_facts_an_operator_checks() -> None:

@@ -102,7 +102,7 @@ fixture-shape test must therefore go through
 One command. No ChatGPT credentials, no upstream contact, no quota:
 
 ```bash
-python scripts/traffic_analysis/codex_body_capture.py \
+uv run python -m scripts.traffic_analysis.codex_body_capture \
   --model gpt-5.5 --model gpt-5.6-sol --transport http \
   --out /mnt/scratch/tmp/codex-body-capture-$(date -u +%Y%m%d)
 ```
@@ -112,6 +112,11 @@ The script re-executes itself inside an unprivileged network namespace
 catalog and a Responses lifecycle from an in-process origin, and runs
 `codex exec` against it with a throwaway `CODEX_HOME` and a disposable
 provider token. External egress is kernel-impossible, not merely unconfigured.
+
+`uv run` is load-bearing: the origin is FastAPI plus uvicorn and the request
+decoder is `zstandard`, so a bare system interpreter fails at import — and on
+many hosts `python` is not a command at all. The tools need codex-lb
+*importable*, not configured: they read no settings and touch no database.
 
 Expected output:
 
