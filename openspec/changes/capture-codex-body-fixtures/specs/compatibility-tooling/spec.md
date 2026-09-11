@@ -58,8 +58,13 @@ upstream service, and without consuming subscription quota. The command MUST
 serve the Codex client from a loopback origin that answers model discovery from
 an operator-supplied catalog file and answers Responses with a deterministic
 lifecycle, and MUST persist the decoded request bytes together with a header
-sidecar and a run manifest recording the client version, the transport, the
-catalog digest and a SHA-256 attestation per artifact. Isolation MUST be
+sidecar and a run manifest recording the client version, the requested and the
+observed transport, the catalog digest and a SHA-256 attestation per artifact.
+The origin MUST serve every transport the client may choose from the provider
+configuration the run generates, and the recorded transport MUST be the one the
+body arrived on rather than the one the run asked for. Where a transport primes
+the request context before sending the turn, the captured body MUST be the frame
+that carries the transcript. Isolation MUST be
 enforced by an unprivileged network namespace whose only interface is loopback,
 so that external egress is impossible rather than unconfigured; disabling the
 namespace MUST require a second, explicit acknowledgement flag. The command
@@ -86,6 +91,15 @@ catalog and the catalog therefore does not determine the body.
 - **AND** the run manifest records the client version, transport, catalog
   digest and per-artifact digests
 - **AND** no request leaves the loopback interface
+
+#### Scenario: A websocket run captures the turn and not the context prewarm
+
+- **GIVEN** a provider configuration that offers websockets and a client that
+  chooses them
+- **WHEN** the client primes the request context and then sends the turn
+- **THEN** the captured body is the frame carrying the transcript
+- **AND** the manifest records the transport the body arrived on, so a run that
+  fell back to HTTP is not reported as a websocket capture
 
 #### Scenario: The capture refuses an exported credentialed home
 
@@ -116,6 +130,8 @@ catalog and the catalog therefore does not determine the body.
 The sanitiser MUST fail closed on any top-level request field outside its
 reviewed allowlist rather than forwarding it. It MUST remove at least the Codex
 telemetry fields the proxy strips from a source-routed body, MUST remove the
+websocket frame envelope from a websocket capture — which is persisted verbatim
+because on that transport the frame is the request body — MUST remove the
 same stream-option keys the proxy removes and MUST drop that object only when
 the removal empties it, and MUST replace the prompt cache key, every input-item
 identifier and every nested identifier with fixed placeholders drawn from a

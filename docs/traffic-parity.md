@@ -226,6 +226,18 @@ itself, reusing `origin_fixture.decode_request_body` for the zstd request
 encoding, so no mitmproxy addon, TLS endpoint or `capture_body_mode` is
 involved.
 
+`--transport websocket` sets `supports_websockets = true` on the generated
+provider and the origin serves both transports, because the configuration only
+*offers* websockets — the client decides. On 0.154.0 the websocket lane opens
+with a `generate: false` prewarm frame whose `input` is empty and only then
+sends the turn (carrying `previous_response_id` for the primed response), so the
+capture keeps the frame that carries the transcript and records the prewarm as a
+non-capturing run. The artifact name, the run record and the manifest are all
+keyed by the transport the body *arrived* on, so a run that fell back to HTTP is
+never reported as a websocket capture. A websocket body is persisted verbatim,
+frame envelope included; the sanitiser removes the envelope on the way to a
+fixture.
+
 The catalog must be pinned to a file. The Codex model manager caches `/models`
 for 300 s and invalidates the cache on a `client_version` mismatch, so a run
 with a newer CLI always refetches from whatever base URL the provider names.

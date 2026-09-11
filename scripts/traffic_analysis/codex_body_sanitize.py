@@ -76,6 +76,14 @@ _PLACEHOLDER_UUID_PATTERN = re.compile(r"\A00000000-0000-4000-8000-\d{12}\Z")
 # ``STRIPPED_TELEMETRY_FIELDS`` (pinned in the fixture gate).
 DROPPED_TOP_LEVEL_FIELDS: frozenset[str] = frozenset({"client_metadata", "access_programs"})
 
+# The websocket lane's frame envelope, not a Responses field: production adds
+# the same ``type`` in ``_build_websocket_response_create_payload``. The capture
+# persists the frame verbatim (it *is* the request body on that transport), so
+# the envelope is removed here rather than by rewriting captured bytes. Kept out
+# of ``DROPPED_TOP_LEVEL_FIELDS`` because that set is pinned against
+# production's telemetry stripper and this is not telemetry.
+WEBSOCKET_ENVELOPE_FIELDS: frozenset[str] = frozenset({"type"})
+
 # Replaced by a fixed placeholder. ``prompt_cache_key`` *equals the session id*
 # in a real body, so a "cache key" is a session identifier by another name.
 PLACEHOLDER_TOP_LEVEL_FIELDS: frozenset[str] = frozenset({"prompt_cache_key"})
@@ -112,11 +120,21 @@ PRESERVED_TOP_LEVEL_FIELDS: frozenset[str] = frozenset(
         "conversation",
         "prompt",
         "service_tier",
+        # Codex-emitted, and the load-bearing evidence that a websocket body is
+        # shaped differently: the turn frame carries ``generate: null`` (the
+        # prewarm frame carries ``false``). Preserved rather than dropped, so a
+        # websocket fixture would record the real ``not_portable_unknown_field``
+        # consequence instead of hiding it.
+        "generate",
     }
 )
 
 SANITISED_TOP_LEVEL_FIELDS: frozenset[str] = (
-    DROPPED_TOP_LEVEL_FIELDS | PLACEHOLDER_TOP_LEVEL_FIELDS | TEXT_REWRITTEN_TOP_LEVEL_FIELDS | {STREAM_OPTIONS_FIELD}
+    DROPPED_TOP_LEVEL_FIELDS
+    | PLACEHOLDER_TOP_LEVEL_FIELDS
+    | TEXT_REWRITTEN_TOP_LEVEL_FIELDS
+    | WEBSOCKET_ENVELOPE_FIELDS
+    | {STREAM_OPTIONS_FIELD}
 )
 
 # Never dropped and never fabricated: the field's shape reaches the fixture.
@@ -324,6 +342,10 @@ def sanitize_body(
     for field in sorted(DROPPED_TOP_LEVEL_FIELDS & set(sanitised)):
         del sanitised[field]
         redactions.append(Redaction(field, "telemetry_field_dropped"))
+
+    for field in sorted(WEBSOCKET_ENVELOPE_FIELDS & set(sanitised)):
+        del sanitised[field]
+        redactions.append(Redaction(field, "websocket_envelope_dropped"))
 
     for field in sorted(PLACEHOLDER_TOP_LEVEL_FIELDS & set(sanitised)):
         if isinstance(sanitised[field], str) and not is_placeholder_uuid(sanitised[field]):

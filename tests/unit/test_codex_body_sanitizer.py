@@ -34,6 +34,8 @@ from scripts.traffic_analysis.codex_body_sanitize import (
     PRESERVED_TOP_LEVEL_FIELDS,
     SANITISED_TOP_LEVEL_FIELDS,
     SHAPE_PRESERVED_TOP_LEVEL_FIELDS,
+    WEBSOCKET_ENVELOPE_FIELDS,
+    Redaction,
     UnsanitisableBodyError,
     is_placeholder_uuid,
     placeholder_uuid,
@@ -372,8 +374,29 @@ def test_an_unreviewed_top_level_field_fails_closed() -> None:
 def test_the_field_sets_are_closed_and_disjoint() -> None:
     assert ALLOWED_TOP_LEVEL_FIELDS == SANITISED_TOP_LEVEL_FIELDS | PRESERVED_TOP_LEVEL_FIELDS
     assert not DROPPED_TOP_LEVEL_FIELDS & SHAPE_PRESERVED_TOP_LEVEL_FIELDS
+    assert not WEBSOCKET_ENVELOPE_FIELDS & SHAPE_PRESERVED_TOP_LEVEL_FIELDS
+    # The envelope is not telemetry, so it stays out of the set that is pinned
+    # against production's ``STRIPPED_TELEMETRY_FIELDS``.
+    assert not WEBSOCKET_ENVELOPE_FIELDS & DROPPED_TOP_LEVEL_FIELDS
     assert PLACEHOLDERS.workspace == "/workspace/repo"
     assert is_placeholder_uuid(placeholder_uuid(0)) and not is_placeholder_uuid(_LIVE_SESSION)
+
+
+def test_a_websocket_capture_sanitises_into_a_fixture() -> None:
+    """The frame envelope goes; ``generate`` stays, because it is Codex-emitted evidence.
+
+    A websocket capture is persisted verbatim -- the frame *is* the request body
+    on that transport -- so without this the shipped lane produced a file its
+    own sanitiser refused as an unreviewed top-level field.
+    """
+
+    body = _realistic_body() | {"type": "response.create", "generate": None}
+
+    sanitised, redactions = sanitize_body(body)
+
+    assert "type" not in sanitised
+    assert sanitised["generate"] is None
+    assert Redaction("type", "websocket_envelope_dropped") in redactions
 
 
 # --- headers sidecar ------------------------------------------------------------------

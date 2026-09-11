@@ -129,6 +129,15 @@ captured gpt-5.6-sol      http 42491 B sha256=03eaf127... exit=0
 wrote: .../{body,headers}-*.json, manifest.json
 ```
 
+`--transport websocket` works the same way and is verified end to end against
+0.154.0. The origin serves both transports because the generated provider only
+*offers* websockets and the client decides; the websocket lane primes the
+context with a `generate: false` frame before sending the turn, so the capture
+keeps the frame carrying the transcript. The artifact name and the manifest
+record the transport the body arrived on, so an HTTP fallback is never reported
+as a websocket capture. A websocket body is persisted verbatim with its frame
+envelope, which the sanitiser removes (`websocket_envelope_dropped`).
+
 The catalog must be pinned: the Codex model manager invalidates its cache on a
 `client_version` mismatch, so every run refetches `/models` from the provider's
 base URL. The catalog does not fully determine the body — 0.154.0 layers

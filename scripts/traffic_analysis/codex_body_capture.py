@@ -30,9 +30,11 @@ provenance. The catalog does not fully determine the body -- 0.154.0 layers
 bundled ``model_info`` overrides on top of it, which is why the CLI version is
 the primary provenance key.
 
-Nothing in this module runs in CI. The guards and the naming are pure
-functions and are unit-tested; the orchestration needs ``codex``, ``unshare``
-and a uvicorn thread.
+What CI covers: the guards and the naming are pure functions
+(``tests/unit/test_codex_body_capture_guards.py``), and the origin is driven
+over both transports with a test client
+(``tests/unit/test_codex_body_capture_origin.py``). Only the orchestration -- the
+namespace re-exec, the uvicorn thread and ``codex`` itself -- stays outside CI.
 """
 
 from __future__ import annotations
@@ -53,7 +55,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 try:
@@ -82,6 +84,9 @@ CAPTURE_TOKEN_VALUE = "non-secret-capture-token"
 PROVIDER_NAME = "capture-origin"
 REEXEC_MARKER = "CODEX_BODY_CAPTURE_NETNS"
 TRANSPORTS = ("http", "websocket")
+# The websocket lane wraps the Responses body in a frame envelope; production
+# builds the same one in ``_build_websocket_response_create_payload``.
+WEBSOCKET_TURN_FRAME_TYPE = "response.create"
 
 # Variables whose presence means a production or proxy configuration has bled
 # into the shell. Mirrors ``traffic-parity-auth/env.sh``: a capture that picks
@@ -318,12 +323,36 @@ def body_summary(body: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def is_turn_body(payload: Mapping[str, Any]) -> bool:
+    """Whether a request carries the turn, rather than priming the context.
+
+    Measured against codex-cli 0.154.0 in the isolated lane: HTTP sends exactly
+    one POST, which is the turn. The websocket lane opens with a
+    ``generate: false`` prewarm frame whose ``input`` is empty -- production
+    knows the same marker in ``proxy/_service/http_bridge`` -- and only then
+    sends the turn, which carries ``previous_response_id`` pointing at the
+    primed response. Keeping "the first body" unconditionally would therefore
+    persist an empty-transcript prewarm as the websocket capture.
+    """
+
+    if payload.get("generate") is False:
+        return False
+    items = payload.get("input")
+    return bool(items) if isinstance(items, list | str) else False
+
+
 def _build_origin(
     catalog: Path,
     destination: Path,
     started_at: datetime,
 ) -> tuple[FastAPI, list[dict[str, Any]]]:
     """The capture origin: serves the pinned catalog, persists decoded bodies.
+
+    Both transports Codex can choose are served, because the provider config
+    only *offers* websockets: the client decides, and a manifest that recorded
+    the requested transport rather than the observed one would be a lie the day
+    it falls back. Every artifact -- filename, record and manifest row -- is
+    keyed by the channel the body actually arrived on.
 
     ``Request`` must be resolvable from module globals: with deferred
     annotations, a function-local import leaves FastAPI unable to see the
@@ -335,6 +364,32 @@ def _build_origin(
     captured: list[dict[str, Any]] = []
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
     app.state.target = None
+
+    def _persist(payload: dict[str, Any], decoded: bytes, headers: Mapping[str, str], channel: str) -> None:
+        target: CaptureTarget = app.state.target
+        observed = CaptureTarget(model_slug=target.model_slug, transport=channel)
+        record = {"model_slug": observed.model_slug, "transport": channel, "extra_turn": True}
+        body_path = destination / capture_artifact_name("body", observed, started_at)
+        headers_path = destination / capture_artifact_name("headers", observed, started_at)
+        if not is_turn_body(payload):
+            # A context prewarm, not a turn: no transcript to capture.
+            captured.append({**record, "prewarm": True})
+            return
+        if body_path.exists():
+            # A retry or a second turn: keep the first body, never overwrite it.
+            captured.append(record)
+            return
+        body_path.write_bytes(decoded)
+        atomic_write_json(headers_path, dict(headers))
+        captured.append(
+            {
+                **record,
+                "extra_turn": False,
+                "body": file_attestation("body", body_path),
+                "headers": file_attestation("headers", headers_path),
+                "summary": body_summary(payload),
+            }
+        )
 
     @app.get("/health")
     async def health() -> dict[str, str]:
@@ -356,29 +411,31 @@ def _build_origin(
             raw.extend(chunk)
         decoded = decode_request_body(bytes(raw), request.headers.get("content-encoding"))
         payload = json.loads(decoded)
-        target: CaptureTarget = request.app.state.target
-        body_path = destination / capture_artifact_name("body", target, started_at)
-        headers_path = destination / capture_artifact_name("headers", target, started_at)
-        if body_path.exists():
-            # A retry or a second turn: keep the first body, never overwrite it.
-            captured.append({"model_slug": target.model_slug, "transport": target.transport, "extra_turn": True})
-        else:
-            body_path.write_bytes(decoded)
-            atomic_write_json(headers_path, dict(request.headers))
-            captured.append(
-                {
-                    "model_slug": target.model_slug,
-                    "transport": target.transport,
-                    "extra_turn": False,
-                    "body": file_attestation("body", body_path),
-                    "headers": file_attestation("headers", headers_path),
-                    "summary": body_summary(payload),
-                }
-            )
+        _persist(payload, decoded, request.headers, "http")
         events = response_events()
         if payload.get("stream") is True:
             return StreamingResponse(sse_frames(events), media_type="text/event-stream")
         return JSONResponse(events[-1]["response"])
+
+    @app.websocket("/v1/responses")
+    @app.websocket("/codex/responses")
+    @app.websocket("/backend-api/codex/responses")
+    async def responses_websocket(websocket: WebSocket) -> None:
+        await websocket.accept()
+        try:
+            while True:
+                frame = await websocket.receive_text()
+                payload = json.loads(frame)
+                if not isinstance(payload, dict) or payload.get("type") != WEBSOCKET_TURN_FRAME_TYPE:
+                    continue
+                # Verbatim: the frame *is* the request body on this transport,
+                # ``type`` envelope included. The sanitiser removes the envelope
+                # on the way to a fixture; the capture does not rewrite bytes.
+                _persist(payload, frame.encode("utf-8"), websocket.headers, "websocket")
+                for event in response_events():
+                    await websocket.send_json(event)
+        except WebSocketDisconnect:
+            return
 
     return app, captured
 
@@ -576,7 +633,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             runs.append(
                 {
                     "model_slug": model_slug,
+                    # ``transport`` is the channel the body arrived on; the
+                    # requested one only configured the provider.
                     "transport": args.transport,
+                    "transport_requested": args.transport,
                     "exit_code": exit_code,
                     **(record or {}),
                 }
@@ -584,11 +644,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             if record is None:
                 print(f"captured {model_slug:16s} {args.transport} NOTHING exit={exit_code} {' | '.join(tail)}")
                 continue
+            observed = str(record["transport"])
             attestation = record["body"]
             summary = record["summary"]
             print(
-                f"captured {model_slug:16s} {args.transport} {attestation['bytes']} B "
+                f"captured {model_slug:16s} {observed} {attestation['bytes']} B "
                 f"sha256={str(attestation['sha256'])[:16]}... exit={exit_code}"
+                + ("" if observed == args.transport else f" (requested {args.transport})")
             )
             print(f"                 keys={','.join(summary['top_level_keys'])}")
             print(
@@ -602,7 +664,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             "started_at": started_at.isoformat(),
             "finished_at": datetime.now(UTC).isoformat(),
             "codex_version": codex_version,
-            "transport": args.transport,
+            "transport_requested": args.transport,
+            "transports_observed": sorted({str(run["transport"]) for run in runs if run.get("body")}),
             "network_namespace": not args.no_network_namespace,
             "catalog": catalog_attestation,
             "runs": runs,
@@ -611,7 +674,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"wrote: {destination}/{{body,headers}}-*.json, manifest.json")
         print(
             "next: python scripts/traffic_analysis/codex_body_sanitize.py "
-            f"--in {destination}/body-<slug>-{args.transport}-<stamp>.json --out <fixture>.json"
+            f"--in {destination}/body-<slug>-<transport>-<stamp>.json --out <fixture>.json"
         )
         return 0 if all(run.get("body") for run in runs) else 1
     except CaptureRefusal as exc:
