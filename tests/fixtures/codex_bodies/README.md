@@ -130,8 +130,11 @@ captured gpt-5.5          http 35357 B sha256=2f851811... exit=0
                  tools=['custom', 'function', 'tool_search', 'web_search'] ... instructions=present
 captured gpt-5.6-sol      http 42491 B sha256=03eaf127... exit=0
                  tools=None items=['additional_tools/developer', ...] instructions=ABSENT
-wrote: .../{body,headers}-*.json, manifest.json
+wrote: .../{body,headers,prewarm}-*.json, manifest.json
 ```
+
+Byte counts move between runs — the session identifier and cache key differ —
+so compare the key list, the tool types and the item sequence, not the sizes.
 
 `--transport websocket` works the same way and is verified end to end against
 0.154.0. The origin serves both transports because the generated provider only
