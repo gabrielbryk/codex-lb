@@ -38,14 +38,21 @@ from app.modules.model_sources.projection import (
 from app.modules.proxy.api import _has_openai_responses_shape
 from app.modules.proxy.replay_safety import PortabilityVerdict, responses_payload_is_provider_portable
 from app.modules.proxy.request_policy import normalize_responses_request_payload
-from scripts.traffic_analysis import fixture_privacy_scan
+from scripts.traffic_analysis import codex_body_sanitize, fixture_privacy_scan
 from scripts.traffic_analysis.codex_body_sanitize import (
     DROPPED_TOP_LEVEL_FIELDS,
+    GENERIC_IDENTITY_NAMES,
     SANITISED_STREAM_OPTIONS_KEYS,
     SHAPE_PRESERVED_TOP_LEVEL_FIELDS,
+    identity_candidates,
 )
 
 pytestmark = pytest.mark.unit
+
+_FIXED_IDENTITIES = ("capture-host-name", "capture-operator")
+# Captured before the autouse fixture replaces it, so the skip list can be
+# exercised through the real function rather than around it.
+_LIVE_IDENTITY_STRINGS = codex_body_sanitize.live_identity_strings
 
 FIXTURES = Path(__file__).resolve().parents[1] / "fixtures" / "codex_bodies"
 PROVENANCE_NAME = "provenance.json"
@@ -86,6 +93,23 @@ def _provenance() -> dict[str, dict[str, Any]]:
 
 PROVENANCE = _provenance()
 FIXTURE_NAMES = sorted(PROVENANCE)
+
+
+@pytest.fixture(autouse=True)
+def _machine_independent_identity_pass(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pin the host/account pass, as ``test_codex_body_sanitizer`` already does.
+
+    Without it the committed gate depended on the name of the machine running
+    it. Simulated with ``getpass.getuser()`` returning ``root`` -- the default in
+    ``docker run``, in devcontainers, in many self-hosted runner images and under
+    ``sudo pytest`` -- ``scan_fixture_tree`` failed with ``live_identity`` on
+    *both* captured fixtures, matching ``<special>:root</special>`` and Codex's
+    own ``spawn_agent`` description, and the finding could not be cleared
+    because the sanitiser deliberately preserves ``/root``.
+    """
+
+    monkeypatch.setattr(codex_body_sanitize, "live_identity_strings", lambda: _FIXED_IDENTITIES)
+    monkeypatch.setattr(fixture_privacy_scan, "live_identity_strings", lambda: _FIXED_IDENTITIES)
 
 
 def _body_files() -> list[str]:
@@ -270,3 +294,53 @@ def test_the_fixture_privacy_gate_passes() -> None:
 
     assert report["passed"] is True, report["findings"]
     assert report["bodies_scanned"] == len(FIXTURE_NAMES) + 1  # + provenance.json
+
+
+@pytest.mark.parametrize("identity", sorted(GENERIC_IDENTITY_NAMES))
+def test_the_privacy_gate_passes_whatever_generic_name_the_host_carries(
+    identity: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Measured machine-independence, not a claim: every skipped name is tried.
+
+    A `live_identity` finding on a name that identifies no operator is
+    unactionable — the sanitiser preserves `/root` and Codex's own vocabulary on
+    purpose, so there is nothing to change in the fixture.
+    """
+
+    monkeypatch.setattr(codex_body_sanitize.socket, "gethostname", lambda: identity)
+    monkeypatch.setattr(codex_body_sanitize.getpass, "getuser", lambda: identity)
+    monkeypatch.setattr(codex_body_sanitize, "live_identity_strings", _LIVE_IDENTITY_STRINGS)
+    monkeypatch.setattr(fixture_privacy_scan, "live_identity_strings", _LIVE_IDENTITY_STRINGS)
+    exempt = {name for name, entry in PROVENANCE.items() if entry["carries_client_telemetry"]}
+
+    report = fixture_privacy_scan.scan_fixture_tree(
+        FIXTURES,
+        allow_telemetry_keys=frozenset(exempt | {PROVENANCE_NAME}),
+    )
+
+    assert report["passed"] is True, f"host/account {identity!r}: {report['findings']}"
+
+
+def test_a_distinctive_operator_identity_is_still_reported(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The skip list narrows the identity pass; it does not disable it."""
+
+    monkeypatch.setattr(fixture_privacy_scan, "live_identity_strings", lambda: ("bespoke-build-box",))
+    candidate = tmp_path / "candidate.json"
+    candidate.write_text(
+        json.dumps({"input": [{"content": "captured on bespoke-build-box tonight"}]}),
+        encoding="utf-8",
+    )
+
+    report = fixture_privacy_scan.scan_fixture_tree(tmp_path)
+
+    assert report["findings"] == [{"path": "candidate.json", "kinds": ["live_identity"]}]
+
+
+def test_a_default_account_name_is_not_treated_as_an_identity() -> None:
+    """A distinctive hostname still is, even when the account name is a default."""
+
+    assert identity_candidates("bespoke-build-box", "root") == ("bespoke-build-box",)
+    assert identity_candidates("runner", "runner") == ()
+    assert identity_candidates("claw", "operator") == ("operator", "claw")
+    # Deterministic on a length tie: iterating a set made the order hash-dependent.
+    assert identity_candidates("zeta", "beta") == ("beta", "zeta")

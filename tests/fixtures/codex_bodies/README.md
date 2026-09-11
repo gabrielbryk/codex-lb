@@ -185,6 +185,14 @@ request body to the proxy host instead.
   Recorded as a deliberate v1 limitation.
 * The host/account identity pass only recognises the machine running the
   sanitiser and the scanner. Another operator's hostname is invisible to it.
+* It also skips `codex_body_sanitize.GENERIC_IDENTITY_NAMES`: names that are the
+  same string on every machine of their class (`root`, `ubuntu`, `runner`,
+  `docker`, …) and names Codex's own payload vocabulary uses (`text`, `tools`,
+  `model`, `shell`, …). Acting on them identifies no operator and corrupts real
+  content — running the sanitiser as `root` rewrote `\broot\b` inside
+  `<environment_context>` and inside Codex's `spawn_agent` description, which
+  `/root`'s deliberate absence from the path pattern exists to prevent. The
+  committed gate pins the pass so it never depends on the machine running it.
 * The identifier scan covers `*.json` bodies. Prose (`*.md`) and
   `provenance.json` are reviewed by a human; credential shapes are still
   rejected in every file.

@@ -194,17 +194,103 @@ _TEXT_PART_FIELDS: tuple[str, ...] = ("text",)
 
 _MINIMUM_IDENTITY_LENGTH = 4
 
+# Host and account names this pass will not act on, for the two reasons that
+# already justify ``/root``'s absence from ``_HOST_PATH``: they identify no
+# operator, and rewriting them would corrupt genuine content.
+#
+# The first group is the same string on every machine of its class -- container
+# and cloud-image defaults, CI runner accounts, system accounts. The second is
+# vocabulary Codex's own payload uses, measured against the committed corpus.
+# Both were reachable, not hypothetical: with ``getpass.getuser()`` returning
+# ``root`` (the default in ``docker run``, in devcontainers, in many self-hosted
+# runner images and under ``sudo pytest``) the identity pass matched
+# ``<special>:root</special>`` and Codex's ``spawn_agent`` description in both
+# captured fixtures, so the privacy gate reported a ``live_identity`` finding
+# that no operator could clear -- while the sanitiser rewrote ``\broot\b`` inside
+# ``<environment_context>`` and destroyed the evidence the design keeps. Of 33
+# plausible host/account names tried, 24 hit at least one committed fixture.
+GENERIC_IDENTITY_NAMES: frozenset[str] = frozenset(
+    {
+        # Defaults and system accounts.
+        "admin",
+        "administrator",
+        "alpine",
+        "builder",
+        "centos",
+        "codespace",
+        "container",
+        "daemon",
+        "debian",
+        "devcontainer",
+        "docker",
+        "fedora",
+        "guest",
+        "jenkins",
+        "localhost",
+        "nobody",
+        "root",
+        "runner",
+        "ubuntu",
+        "user",
+        "users",
+        "vagrant",
+        # Codex payload vocabulary.
+        "agent",
+        "auto",
+        "bash",
+        "build",
+        "codex",
+        "custom",
+        "function",
+        "high",
+        "input",
+        "local",
+        "main",
+        "medium",
+        "model",
+        "name",
+        "shell",
+        "store",
+        "stream",
+        "test",
+        "text",
+        "tools",
+        "type",
+        "work",
+    }
+)
 
-def live_identity_strings() -> tuple[str, ...]:
-    """The running host and account names, longest first.
 
-    Only caught for the machine that runs the sanitiser (and the scanner): the
-    same value from another operator's host is invisible here. That is the
-    documented limit of this pass, not a claim of completeness.
+def identity_candidates(hostname: str, username: str) -> tuple[str, ...]:
+    """The identity strings worth rewriting, longest first then alphabetical.
+
+    Deterministic on purpose: the replacement order is part of the sanitiser's
+    output, and iterating a set made ties depend on hash order.
     """
 
-    candidates = {socket.gethostname(), getpass.getuser()}
-    return tuple(sorted((name for name in candidates if len(name) >= _MINIMUM_IDENTITY_LENGTH), key=len, reverse=True))
+    candidates = {hostname, username}
+    return tuple(
+        sorted(
+            (
+                name
+                for name in candidates
+                if len(name) >= _MINIMUM_IDENTITY_LENGTH and name.casefold() not in GENERIC_IDENTITY_NAMES
+            ),
+            key=lambda name: (-len(name), name),
+        )
+    )
+
+
+def live_identity_strings() -> tuple[str, ...]:
+    """The running host and account names, minus the ones that name no operator.
+
+    Only caught for the machine that runs the sanitiser (and the scanner): the
+    same value from another operator's host is invisible here. That, and
+    ``GENERIC_IDENTITY_NAMES``, are the documented limits of this pass rather
+    than a claim of completeness.
+    """
+
+    return identity_candidates(socket.gethostname(), getpass.getuser())
 
 
 def is_placeholder_uuid(value: str) -> bool:
