@@ -8,6 +8,7 @@ from sqlalchemy import create_engine, text
 from app.db.migrate import _build_alembic_config, check_schema_drift, run_upgrade
 from app.db.migration_url import to_sync_database_url
 from tests.integration.test_affinity_identity_migration import (
+    _AUTH_TABLES,
     _applied_revisions,
     _auth_snapshot,
     _current_head,
@@ -25,6 +26,21 @@ _AFFINITY = "20260910_200000_merge_affinity_identity_heads"
 _INVITES = "20260909_040000_add_dashboard_user_invites"
 _INVITE_MERGE = "20260910_220000_merge_affinity_invite_heads"
 _TABLES = ("accounts", "request_logs", "api_keys", "dashboard_settings", "audit_logs", "dashboard_user_invites")
+_GOVERNED_TABLES = frozenset(_TABLES) | frozenset(_AUTH_TABLES)
+
+
+def _governed_schema_drift(url: str) -> tuple[str, ...]:
+    """Drift this suite owns, for use at a deliberately downgraded revision.
+
+    Global emptiness is not an invariant here: downgrading to the affinity
+    parent unapplies everything above the topmost merge, so any later revision
+    that adds a column to a pre-existing table shows up as drift against the
+    current ORM metadata. ``_current_head`` is already derived rather than
+    pinned so later merges need not edit these suites; scoping this assertion
+    keeps that property for later column additions too. The two assertions at
+    head stay strict.
+    """
+    return tuple(diff for diff in check_schema_drift(url) if any(f"'{table}'" in diff for table in _GOVERNED_TABLES))
 
 
 @pytest.mark.parametrize("starting_revision", [_AFFINITY, _INVITES])
@@ -96,7 +112,7 @@ def test_populated_invite_history_survives_merge_reversal(migration_url: str, st
             assert _INVITE_MERGE not in applied
             for table, rows in preserved.items():
                 assert sorted(_rows(connection, table), key=repr) == sorted(rows, key=repr)
-        assert check_schema_drift(url) == ()
+        assert _governed_schema_drift(url) == ()
         assert run_upgrade(url, "head", bootstrap_legacy=False).current_revision == _current_head(url)
         with engine.connect() as connection:
             for table, rows in preserved.items():
