@@ -1,0 +1,37 @@
+## Why
+
+The provider-portability gate for the subscription-exhaustion overflow Model Source (issue #2123) classifies Codex request bodies, but its fixture corpus was two hand-written bodies. Design v3 §16 item (i) kept "captured bodies replace the synthetic pair" open as a verification item, and `add-subscription-overflow-model-source/design.md` decision 21 recorded the tool-declaration shape `{type, description?}` as a *premise*. Without a real capture nobody could tell whether native Codex traffic can overflow at all — and the production flip is gated on a canary that assumes it can.
+
+Capturing a real body was believed to need the owner's ChatGPT credentials and one paid upstream request. It does not. A loopback origin that answers `/models` and `/v1/responses`, served inside an unprivileged network namespace, produces a genuine Codex 0.154.0 request body with zero credentials, zero upstream calls and zero quota. This change productionises that lane as one command, adds the two bodies it captured, and records their real verdicts as machine-readable provenance.
+
+Those verdicts are the finding: **native Codex traffic cannot overflow today.** The real `gpt-5.5` body declines even when the source model declares `custom`, `tool_search` *and* `web_search`, for three independent reasons in production code. Closing those gaps is behavioural work outside this change; recording the fact is not.
+
+## What Changes
+
+- **Capture lane (`scripts/traffic_analysis/codex_body_capture.py`, new).** One command: `--model` (repeatable), `--transport {http,websocket}`, `--out`, `--catalog`, `--prompt`, `--codex-bin`, `--port`, `--keep-home`, `--no-network-namespace` (requires `--i-accept-network-egress`). It re-executes itself under `unshare --map-root-user --net` with loopback up, serves an operator-pinned `/models` catalog and a deterministic Responses lifecycle from an in-process origin, runs `codex exec` against it with a throwaway `CODEX_HOME` and a disposable provider token, and persists the decoded request bytes, a headers sidecar, a per-run manifest with SHA-256 attestations, and a printed summary. Every refusal — output inside the repository or under a temporary filesystem, a credentialed `CODEX_HOME`, a shell carrying `CODEX_LB_*`/`OPENAI_*`/`CHATGPT_BASE_URL`/`CODEX_*` upstream pointers, a non-loopback origin, a repository config or `.env` as catalog — fires before any process starts.
+- **Sanitiser (`scripts/traffic_analysis/codex_body_sanitize.py`, new).** Importable pure functions plus a CLI, with no `app` imports. It fails closed on an unreviewed top-level field, drops the telemetry fields production strips, replaces `prompt_cache_key` (which equals the session id) and every input-item id with fixed placeholders, and rewrites the operator strings inside message content: `<environment_context>` paths/date/timezone/shell, the `# AGENTS.md instructions for <path>` heading, and the `<skills_instructions>` skill-root path and skill inventory. It never fabricates a key, and it byte-preserves `tools` and the Lite `additional_tools` bundle.
+- **Fixture privacy gate (`scripts/traffic_analysis/fixture_privacy_scan.py`, new).** Reuses `privacy_scan.scan_tree` for credential shapes over every file and adds an identifier pass over the JSON bodies: non-placeholder UUIDs, workspace paths, emails, the running host/account identity, and telemetry key names. Patterns match the telemetry *shape*, not the bare word, because Codex's real `exec_command` schema declares a legitimate numeric `session_id`.
+- **Corpus provenance.** `tests/fixtures/codex_bodies/provenance.json` records, per fixture, origin (`synthetic`/`captured`), slug, transport, capture time, CLI version, catalog digest, sanitisation list, whether it carries client telemetry, and the expected view plus expected portability verdict. `README.md` renders the same facts, the divergence table against Codex 0.154.0, and the operator runbook. The marker is never placed inside a body: an extra top-level key makes `overflow_portability_view` decline with `not_portable_unknown_field`.
+- **Two captured bodies.** `captured_gpt55_standard_http.json` and `captured_gpt56sol_lite_http.json`, Codex 0.154.0, sanitised, with their real declining verdicts recorded.
+- **Gate (`tests/unit/test_codex_body_fixtures.py`, new).** Provenance-driven: shape through `normalize_responses_request_payload(payload, openai_compat=_has_openai_responses_shape(payload))` (a real Lite body has no `instructions`, so bare `ResponsesRequest.model_validate` fails), the recorded view and verdict, cross-pins against `STRIPPED_TELEMETRY_FIELDS` / `STRIPPED_STREAM_OPTIONS_KEYS` / `OVERFLOW_VIEW_FIELDS`, and files ↔ provenance ↔ README sync in both directions. Every message carries the provenance.
+- **Synthetic pair corrected where it was unemittable.** `stream_options.reasoning_summary_delivery` becomes `sequential_cutoff` (the enum has no other value; `interleaved` cannot be emitted), `parallel_tool_calls` becomes `true` on the gpt-5.5 body, and both bodies' identifiers become placeholders. They stay pre-strip fixtures — they exist to feed `strip_source_telemetry` — and the remaining divergences are documented rather than papered over.
+- **Docs.** `docs/traffic-parity.md` gains a "Capture a Codex request body for the portability fixtures" section.
+
+Out of scope, tracked separately: the three production portability gaps the captures expose, and the correction of decision 21's declaration-shape premise.
+
+## Capabilities
+
+### New Capabilities
+
+None.
+
+### Modified Capabilities
+
+- `compatibility-tooling`: the credential/body fail-safe requirement is carved out so sanitised fixture bodies with recorded provenance and a passing privacy scan may be committed, and the isolated capture lane with its refusals is specified.
+- `model-source-routing`: the provider-portability fixture corpus must record origin, slug, transport, CLI version, catalog digest and expected verdict, and the gate must assert the recorded verdict.
+
+## Impact
+
+- New: `scripts/traffic_analysis/codex_body_capture.py`, `scripts/traffic_analysis/codex_body_sanitize.py`, `scripts/traffic_analysis/fixture_privacy_scan.py`, `tests/fixtures/codex_bodies/{provenance.json,README.md}`, two captured fixture bodies, `tests/unit/test_codex_body_{fixtures,sanitizer,capture_guards}.py`.
+- Edited: `scripts/traffic_analysis/origin_fixture.py` (four behaviour-free public aliases so the capture origin stays DRY), the two synthetic fixtures, `tests/unit/test_model_sources_projection.py` (stale docstring: WP-C2 has shipped, the corpus now gates the production flip), `docs/traffic-parity.md`.
+- No Alembic revision, no settings, no `CODEX_LB_*` variable, no dashboard or API surface, no frontend. Nothing under `app/`.
