@@ -217,12 +217,20 @@ def rewrite_operator_text(text: str, placeholders: Placeholders = PLACEHOLDERS) 
     if "<skills_instructions>" in text or "### Skill roots" in text:
         text = _rewrite_skills_instructions(text, placeholders)
     for tag, attribute in _ENVIRONMENT_TAGS:
+        # Every replacement goes through a callable: a template string would
+        # interpret backslashes and group references in the placeholder, and
+        # escaping it for a *pattern* instead writes the escapes into the
+        # output (``2026\-01\-01``).
         replacement = getattr(placeholders, attribute)
-        text = re.sub(rf"(<{tag}>)([^<]*)(</{tag}>)", rf"\g<1>{re.escape(replacement)}\g<3>", text)
+        text = re.sub(
+            rf"(<{tag}>)[^<]*(</{tag}>)",
+            lambda match, value=replacement: f"{match.group(1)}{value}{match.group(2)}",
+            text,
+        )
     text = _AGENTS_HEADING.sub(lambda m: f"{m.group(1)}{placeholders.workspace}", text)
-    text = _HOST_PATH.sub(placeholders.workspace, text)
+    text = _HOST_PATH.sub(lambda _: placeholders.workspace, text)
     for identity in live_identity_strings():
-        text = re.sub(rf"\b{re.escape(identity)}\b", placeholders.account, text)
+        text = re.sub(rf"\b{re.escape(identity)}\b", lambda _: placeholders.account, text)
     return text
 
 

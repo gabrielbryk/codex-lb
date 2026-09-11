@@ -195,6 +195,32 @@ def test_no_strip_target_survives_anywhere_in_the_serialized_output(secret: str)
     assert redactions
 
 
+def test_every_placeholder_lands_verbatim_in_the_output() -> None:
+    """Removal is not enough: the substitute must be the literal placeholder.
+
+    Escaping a replacement string for a regex *pattern* still removes the
+    secret while writing the escapes into the fixture (``2026\\-01\\-01``), so
+    the value is asserted, not just the absence of the original.
+    """
+
+    sanitised, _ = sanitize_body(_realistic_body())
+    environment = sanitised["input"][1]["content"][1]["text"]
+
+    assert f"<cwd>{PLACEHOLDERS.workspace}</cwd>" in environment
+    assert f"<current_date>{PLACEHOLDERS.date}</current_date>" in environment
+    assert f"<timezone>{PLACEHOLDERS.timezone}</timezone>" in environment
+    assert f"<shell>{PLACEHOLDERS.shell}</shell>" in environment
+    assert f"<root>{PLACEHOLDERS.workspace}</root>" in environment
+    assert "\\" not in environment
+    skills = sanitised["input"][0]["content"][0]["text"]
+    assert f"`r0` = `{PLACEHOLDERS.skill_root}`" in skills
+    assert PLACEHOLDERS.skill_name in skills
+    heading = sanitised["input"][1]["content"][0]["text"]
+    assert heading.startswith(f"# AGENTS.md instructions for {PLACEHOLDERS.workspace}")
+    identities = sanitised["input"][1]["content"][2]["text"]
+    assert identities == f"Reviewed by {PLACEHOLDERS.account} on {PLACEHOLDERS.account}."
+
+
 def test_telemetry_fields_go_whole_and_the_cache_key_becomes_a_placeholder() -> None:
     sanitised, _ = sanitize_body(_realistic_body())
 
