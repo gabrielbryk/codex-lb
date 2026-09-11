@@ -25,6 +25,7 @@ offending value.
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import re
 import sys
@@ -65,8 +66,14 @@ _STRING_VALUED_IDENTIFIER_KEYS: tuple[str, ...] = (
 # Bare telemetry key names. Unlike every other kind this one cannot be
 # conditioned on the value, so a fixture that exists to exercise the production
 # telemetry stripper declares itself in ``provenance.json`` and is exempted by
-# name (``allow_telemetry_keys``) rather than being made unrepresentative.
+# name rather than being made unrepresentative. The declaration is *read* from
+# ``provenance.json`` (see ``declared_telemetry_key_bodies``) instead of being
+# retyped on the command line: the documented gate step has to pass on a
+# pristine checkout, and it previously needed three undocumented
+# ``--allow-telemetry-keys`` values that existed only inside the unit tests.
 TELEMETRY_KEY_KIND = "telemetry_field"
+
+PROVENANCE_NAME = "provenance.json"
 
 _PATTERNS: tuple[tuple[str, re.Pattern[bytes]], ...] = (
     # ``/root`` is not flagged: it identifies no operator, and Codex's own
@@ -144,6 +151,35 @@ def _identifier_pass(root: Path, allow_telemetry_keys: frozenset[str]) -> tuple[
     return findings, scanned
 
 
+def declared_telemetry_key_bodies(root: Path) -> frozenset[str]:
+    """Root-relative bodies that *declare* they carry bare Codex telemetry keys.
+
+    Read from ``provenance.json``: a pre-strip fixture exists to feed
+    ``strip_source_telemetry``, and ``carries_client_telemetry`` is where it says
+    so. ``provenance.json`` exempts itself for the same reason the README is
+    prose -- it *names* the fields the sanitiser removes. Every value-shaped kind
+    (a live UUID, a workspace path, an email, this host's identity, a credential
+    shape) still applies to all of them.
+
+    A tree without a ``provenance.json`` -- a raw capture directory, say -- gets
+    no exemption at all, which is the answer an operator wants there.
+    """
+
+    try:
+        payload = json.loads((root / PROVENANCE_NAME).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return frozenset()
+    fixtures = payload.get("fixtures") if isinstance(payload, dict) else None
+    if not isinstance(fixtures, dict):
+        return frozenset()
+    declared = {
+        str(name)
+        for name, entry in fixtures.items()
+        if isinstance(entry, dict) and entry.get("carries_client_telemetry")
+    }
+    return frozenset(declared | {PROVENANCE_NAME})
+
+
 def scan_fixture_tree(
     root: str | Path,
     *,
@@ -151,19 +187,19 @@ def scan_fixture_tree(
 ) -> dict[str, Any]:
     """Credential scan over every file plus the identifier scan over the bodies.
 
-    ``allow_telemetry_keys`` names the root-relative bodies that may carry bare
-    Codex telemetry key names -- the pre-strip fixtures whose whole purpose is
-    to feed ``strip_source_telemetry``. Every other kind (a live UUID, a
-    workspace path, an email, this host's identity, a credential shape) is
-    rejected in those files too.
+    The bodies that may carry bare Codex telemetry key names are read from
+    ``provenance.json``; ``allow_telemetry_keys`` adds to that, for a tree that
+    has no provenance file. Every other kind is rejected everywhere.
 
-    Report shape mirrors ``privacy_scan.scan_tree`` and adds
-    ``bodies_scanned``; findings from both passes are merged per path.
+    Report shape mirrors ``privacy_scan.scan_tree`` and adds ``bodies_scanned``
+    and ``telemetry_key_exemptions``; findings from both passes are merged per
+    path.
     """
 
     root_path = Path(root).resolve()
+    exemptions = declared_telemetry_key_bodies(root_path) | allow_telemetry_keys
     credential = scan_tree(root_path)
-    identifier, bodies_scanned = _identifier_pass(root_path, allow_telemetry_keys)
+    identifier, bodies_scanned = _identifier_pass(root_path, exemptions)
     merged: dict[str, set[str]] = {}
     for finding in [*credential["findings"], *identifier]:
         merged.setdefault(str(finding["path"]), set()).update(finding["kinds"])
@@ -175,6 +211,7 @@ def scan_fixture_tree(
         "files_scanned": credential["files_scanned"],
         "bodies_scanned": bodies_scanned,
         "bytes_scanned": credential["bytes_scanned"],
+        "telemetry_key_exemptions": sorted(exemptions),
         "findings": findings,
     }
 
@@ -189,7 +226,10 @@ def build_parser() -> argparse.ArgumentParser:
         action="append",
         default=[],
         metavar="NAME",
-        help="Root-relative body that may keep bare Codex telemetry key names (pre-strip fixtures)",
+        help=(
+            "Extra root-relative body that may keep bare Codex telemetry key names. "
+            "Bodies declaring carries_client_telemetry in provenance.json are already exempt."
+        ),
     )
     return parser
 
@@ -199,9 +239,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     result = scan_fixture_tree(args.root, allow_telemetry_keys=frozenset(args.allow_telemetry_keys))
     if args.output:
         atomic_write_json(args.output, result)
+    exemptions = result["telemetry_key_exemptions"]
     print(
         f"Fixture privacy scan: {'PASS' if result['passed'] else 'FAIL'}; "
-        f"{result['files_scanned']} file(s), {result['bodies_scanned']} body/bodies"
+        f"{result['files_scanned']} file(s), {result['bodies_scanned']} body/bodies, "
+        f"telemetry-key exemption(s): {', '.join(exemptions) if exemptions else 'none'}"
     )
     for finding in result["findings"]:
         print(f"  {finding['path']}: {', '.join(finding['kinds'])}")

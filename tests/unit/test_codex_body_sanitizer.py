@@ -446,12 +446,14 @@ def _run_gate(
     (root / gate.PROVENANCE_NAME).write_text(json.dumps(provenance, indent=2) + "\n", encoding="utf-8")
 
 
-def _scan(root: Path, provenance: dict[str, Any]) -> dict[str, Any]:
-    exempt = {name for name, entry in provenance["fixtures"].items() if entry["carries_client_telemetry"]}
-    return fixture_privacy_scan.scan_fixture_tree(
-        root,
-        allow_telemetry_keys=frozenset(exempt | {gate.PROVENANCE_NAME}),
-    )
+def _scan(root: Path) -> dict[str, Any]:
+    """The shipped default: the telemetry-key exemptions come from ``provenance.json``.
+
+    No ``allow_telemetry_keys`` argument, so the mutations are judged by exactly
+    the invocation the runbook documents.
+    """
+
+    return fixture_privacy_scan.scan_fixture_tree(root)
 
 
 def test_mutation_readding_client_telemetry_fails_the_privacy_gate(tmp_path: Path) -> None:
@@ -460,7 +462,7 @@ def test_mutation_readding_client_telemetry_fails_the_privacy_gate(tmp_path: Pat
     body["client_metadata"] = {"session_id": _LIVE_SESSION}
     (root / CAPTURED_STANDARD).write_text(json.dumps(body), encoding="utf-8")
 
-    report = _scan(root, provenance)
+    report = _scan(root)
 
     assert report["passed"] is False
     kinds = {finding["path"]: finding["kinds"] for finding in report["findings"]}
@@ -474,7 +476,7 @@ def test_mutation_a_live_cache_key_fails_the_privacy_gate(tmp_path: Path) -> Non
     body["prompt_cache_key"] = _LIVE_SESSION
     (root / CAPTURED_LITE).write_text(json.dumps(body), encoding="utf-8")
 
-    report = _scan(root, provenance)
+    report = _scan(root)
 
     assert report["passed"] is False
     assert "uuid" in dict((finding["path"], finding["kinds"]) for finding in report["findings"])[CAPTURED_LITE]
@@ -488,13 +490,13 @@ def test_mutation_an_operator_home_path_fails_the_privacy_gate(tmp_path: Path) -
     body["instructions"] = f"Working in /home/{getpass.getuser()}/work/codex-lb on the parser."
     (root / CAPTURED_STANDARD).write_text(json.dumps(body), encoding="utf-8")
 
-    report = _scan(root, provenance)
+    report = _scan(root)
 
     assert report["passed"] is False
     kinds = dict((finding["path"], finding["kinds"]) for finding in report["findings"])[CAPTURED_STANDARD]
     assert "home_path" in kinds
     # The unmutated corpus passes the same scan, so the finding is the mutation's.
-    assert _scan(*_corpus(tmp_path / "pristine"))["passed"] is True
+    assert _scan(_corpus(tmp_path / "pristine")[0])["passed"] is True
 
 
 def test_mutation_a_credential_shape_fails_through_the_reused_scanner(tmp_path: Path) -> None:
@@ -505,7 +507,7 @@ def test_mutation_a_credential_shape_fails_through_the_reused_scanner(tmp_path: 
     body["instructions"] = "Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dBjftJeZ4CVP"
     (root / CAPTURED_STANDARD).write_text(json.dumps(body), encoding="utf-8")
 
-    report = _scan(root, provenance)
+    report = _scan(root)
 
     assert report["passed"] is False
     kinds = dict((finding["path"], finding["kinds"]) for finding in report["findings"])[CAPTURED_STANDARD]

@@ -34,7 +34,9 @@ their credential values were disposable.
 - **GIVEN** a captured request body that has been sanitised
 - **AND** a provenance entry recording its origin, model slug, transport,
   client version, catalog digest and sanitisation list
-- **WHEN** the fixture privacy scan runs over the corpus in strict mode
+- **WHEN** the fixture privacy scan runs over the corpus in strict mode, with no
+  arguments beyond the corpus root, because the bodies permitted to keep bare
+  client telemetry key names are read from their own provenance entries
 - **THEN** the scan passes and the body may be committed
 - **AND** the raw capture, its header sidecar and its run manifest remain
   excluded from version control

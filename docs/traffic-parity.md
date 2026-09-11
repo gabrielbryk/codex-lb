@@ -279,8 +279,17 @@ python scripts/traffic_analysis/fixture_privacy_scan.py \
   --root tests/fixtures/codex_bodies --strict
 ```
 
+Both commands run as written on a pristine checkout: the privacy gate reads the
+bodies allowed to keep bare Codex telemetry key names from `provenance.json`
+(`carries_client_telemetry`) and prints them, so it needs no flags.
+`--allow-telemetry-keys` remains for a tree that has no provenance file. Also
+scan the raw capture directory, but *without* `--strict`: the raw body, header
+sidecar and manifest report findings by construction, which is the reminder to
+delete them rather than a gate.
+
 The sanitiser fails closed on an unreviewed top-level field, drops the Codex
-telemetry fields production also strips, replaces identifiers with fixed
+telemetry fields production also strips, removes the websocket frame envelope
+from a websocket capture, replaces identifiers with fixed
 placeholders, and rewrites the operator strings inside message content: the
 `<environment_context>` paths, date, timezone and shell, the
 `# AGENTS.md instructions for <path>` heading, and the `<skills_instructions>`

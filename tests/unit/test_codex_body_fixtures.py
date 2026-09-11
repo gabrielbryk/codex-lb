@@ -277,23 +277,33 @@ def test_readme_rows_and_provenance_rows_agree_in_both_directions() -> None:
 
 
 def test_the_fixture_privacy_gate_passes() -> None:
-    """Pre-strip fixtures declare themselves; nothing else is exempt.
+    """Pre-strip fixtures declare themselves *in provenance*; nothing else is exempt.
 
-    ``provenance.json`` is exempted from the bare-telemetry-key kind for the
-    same reason the README is prose: it *names* the fields the sanitiser
-    removes. Every value-shaped kind (a live UUID, a workspace path, an email
-    address, this host's identity, a credential shape) still applies to it.
+    No ``allow_telemetry_keys`` argument, because the declaration lives in
+    ``provenance.json`` and the gate reads it there. ``provenance.json`` is
+    exempted from the bare-telemetry-key kind for the same reason the README is
+    prose: it *names* the fields the sanitiser removes. Every value-shaped kind
+    (a live UUID, a workspace path, an email address, this host's identity, a
+    credential shape) still applies to it.
     """
 
-    exempt = {name for name, entry in PROVENANCE.items() if entry["carries_client_telemetry"]}
-
-    report = fixture_privacy_scan.scan_fixture_tree(
-        FIXTURES,
-        allow_telemetry_keys=frozenset(exempt | {PROVENANCE_NAME}),
-    )
+    report = fixture_privacy_scan.scan_fixture_tree(FIXTURES)
 
     assert report["passed"] is True, report["findings"]
     assert report["bodies_scanned"] == len(FIXTURE_NAMES) + 1  # + provenance.json
+    exempt = {name for name, entry in PROVENANCE.items() if entry["carries_client_telemetry"]}
+    assert set(report["telemetry_key_exemptions"]) == exempt | {PROVENANCE_NAME}
+
+
+def test_the_documented_privacy_gate_command_passes_verbatim() -> None:
+    """The runbook step, character for character.
+
+    It used to exit 2 on a pristine checkout (three ``telemetry_field``
+    findings) and only passed with three undocumented ``--allow-telemetry-keys``
+    values that existed nowhere outside the unit tests.
+    """
+
+    assert fixture_privacy_scan.main(["--root", str(FIXTURES), "--strict"]) == 0
 
 
 @pytest.mark.parametrize("identity", sorted(GENERIC_IDENTITY_NAMES))
@@ -311,12 +321,8 @@ def test_the_privacy_gate_passes_whatever_generic_name_the_host_carries(
     monkeypatch.setattr(codex_body_sanitize.getpass, "getuser", lambda: identity)
     monkeypatch.setattr(codex_body_sanitize, "live_identity_strings", _LIVE_IDENTITY_STRINGS)
     monkeypatch.setattr(fixture_privacy_scan, "live_identity_strings", _LIVE_IDENTITY_STRINGS)
-    exempt = {name for name, entry in PROVENANCE.items() if entry["carries_client_telemetry"]}
 
-    report = fixture_privacy_scan.scan_fixture_tree(
-        FIXTURES,
-        allow_telemetry_keys=frozenset(exempt | {PROVENANCE_NAME}),
-    )
+    report = fixture_privacy_scan.scan_fixture_tree(FIXTURES)
 
     assert report["passed"] is True, f"host/account {identity!r}: {report['findings']}"
 
