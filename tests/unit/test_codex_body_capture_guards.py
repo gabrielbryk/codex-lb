@@ -19,6 +19,7 @@ import pytest
 from app.core.utils.proxy_env import STANDARD_OUTBOUND_PROXY_ENV_NAMES
 from scripts.traffic_analysis.codex_body_capture import (
     CAPTURE_TOKEN_VARIABLE,
+    DEFAULT_CATALOG,
     FORBIDDEN_ENVIRONMENT_PREFIXES,
     FORBIDDEN_ENVIRONMENT_VARIABLES,
     FORBIDDEN_PROXY_ENVIRONMENT_VARIABLES,
@@ -218,6 +219,13 @@ def test_a_catalog_file_is_accepted(tmp_path: Path) -> None:
     catalog.write_text('{"models": []}', encoding="utf-8")
 
     assert assert_catalog_path(catalog) == catalog.resolve()
+
+
+def test_the_committed_default_catalog_is_accepted() -> None:
+    """``--catalog`` has a committed default, so the "one command" needs no arguments beyond --out."""
+
+    assert assert_catalog_path(DEFAULT_CATALOG) == DEFAULT_CATALOG.resolve()
+    assert build_parser().parse_args(["--model", "gpt-5.5", "--out", "/mnt/scratch/tmp/x"]).catalog == DEFAULT_CATALOG
 
 
 def test_a_missing_catalog_is_refused(tmp_path: Path) -> None:

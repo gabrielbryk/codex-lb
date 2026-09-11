@@ -211,7 +211,6 @@ at a TLS boundary:
 ```bash
 python scripts/traffic_analysis/codex_body_capture.py \
   --model gpt-5.5 --model gpt-5.6-sol --transport http \
-  --catalog /path/to/models_cache.json \
   --out /mnt/scratch/tmp/codex-body-capture-$(date -u +%Y%m%d)
 ```
 
@@ -241,11 +240,20 @@ fixture.
 The catalog must be pinned to a file. The Codex model manager caches `/models`
 for 300 s and invalidates the cache on a `client_version` mismatch, so a run
 with a newer CLI always refetches from whatever base URL the provider names.
-Its SHA-256 is recorded as provenance — but it does not fully determine the
-body: 0.154.0 layers bundled `model_info` overrides on top of the served
-catalog (a row saying `supports_search_tool: false` still produces a body with
-`web_search` and `tool_search` declarations), which is why the CLI version is
-the primary provenance key.
+`--catalog` therefore defaults to the committed reference catalog in
+[`scripts/traffic_analysis/catalogs/`](https://github.com/Soju06/codex-lb/tree/main/scripts/traffic_analysis/catalogs/README.md),
+the one that produced the fixture corpus: its SHA-256 is the `catalog_sha256`
+those provenance entries record, and the corpus gate pins the two together, so
+any operator can reproduce a capture and verify the recorded digest. To capture
+a different model set, pass a Codex `/models` response — the shape Codex itself
+caches as `$CODEX_HOME/models_cache.json`, an object with a `models` array whose
+entries the client deserialises strictly — and record its digest.
+
+The catalog does not fully determine the body: 0.154.0 layers bundled
+`model_info` overrides on top of the served catalog (a row saying
+`supports_search_tool: false` still produces a body with `web_search` and
+`tool_search` declarations), which is why the CLI version is the primary
+provenance key.
 
 Every refusal fires before any process starts: an `--out` inside the repository
 or under a temporary filesystem, an exported `CODEX_HOME` holding an

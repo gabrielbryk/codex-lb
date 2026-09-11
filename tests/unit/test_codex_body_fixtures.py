@@ -18,6 +18,7 @@ portable" is meaningless without knowing which client version produced it.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from pathlib import Path
@@ -39,6 +40,7 @@ from app.modules.proxy.api import _has_openai_responses_shape
 from app.modules.proxy.replay_safety import PortabilityVerdict, responses_payload_is_provider_portable
 from app.modules.proxy.request_policy import normalize_responses_request_payload
 from scripts.traffic_analysis import codex_body_sanitize, fixture_privacy_scan
+from scripts.traffic_analysis.codex_body_capture import DEFAULT_CATALOG
 from scripts.traffic_analysis.codex_body_sanitize import (
     DROPPED_TOP_LEVEL_FIELDS,
     GENERIC_IDENTITY_NAMES,
@@ -222,6 +224,26 @@ def test_every_fixture_matches_its_recorded_view_and_verdict(name: str) -> None:
     assert verdict == PortabilityVerdict(bool(expected["portable"]), expected["reason"], expected["detail"]), (
         f"{label}: declared {sorted(expected['declared_tool_types'])} -> {verdict}"
     )
+
+
+def test_the_committed_catalog_is_the_one_every_captured_fixture_records() -> None:
+    """Reproducibility, verified rather than asserted in prose.
+
+    ``--catalog`` used to be a required flag with no documented source, no
+    schema and no committed sample: the file whose digest provenance records
+    lived outside the repository, so no other operator could reproduce a capture
+    or check the recorded digest. The capture command now defaults to this file,
+    and this test is what keeps the two in step.
+    """
+
+    digest = hashlib.sha256(DEFAULT_CATALOG.read_bytes()).hexdigest()
+    catalog = json.loads(DEFAULT_CATALOG.read_text(encoding="utf-8"))
+    captured = {name for name, entry in PROVENANCE.items() if entry["origin"] == "captured"}
+
+    assert captured
+    for name in sorted(captured):
+        assert PROVENANCE[name]["catalog_sha256"] == digest, _label(name)
+        assert PROVENANCE[name]["model_slug"] in {model["slug"] for model in catalog["models"]}, _label(name)
 
 
 def test_a_captured_body_records_that_native_codex_traffic_cannot_overflow() -> None:

@@ -104,7 +104,6 @@ One command. No ChatGPT credentials, no upstream contact, no quota:
 ```bash
 python scripts/traffic_analysis/codex_body_capture.py \
   --model gpt-5.5 --model gpt-5.6-sol --transport http \
-  --catalog /path/to/models_cache.json \
   --out /mnt/scratch/tmp/codex-body-capture-$(date -u +%Y%m%d)
 ```
 
@@ -119,7 +118,7 @@ Expected output:
 ```text
 network namespace: loopback only (unshare --net)
 capture origin: http://127.0.0.1:19090/v1 (health ok)
-catalog: models_cache.json sha256=de111010...
+catalog: codex-models-20260911.json sha256=de111010...
 codex: codex-cli 0.154.0
 captured gpt-5.5          http 35357 B sha256=2f851811... exit=0
                  keys=client_metadata,include,input,instructions,model,...
@@ -140,9 +139,16 @@ envelope, which the sanitiser removes (`websocket_envelope_dropped`).
 
 The catalog must be pinned: the Codex model manager invalidates its cache on a
 `client_version` mismatch, so every run refetches `/models` from the provider's
-base URL. The catalog does not fully determine the body — 0.154.0 layers
-bundled `model_info` overrides on top of it, which is why the CLI version is
-the primary provenance key and the catalog digest is secondary.
+base URL. `--catalog` defaults to
+[`scripts/traffic_analysis/catalogs/codex-models-20260911.json`](../../../scripts/traffic_analysis/catalogs/README.md),
+the committed catalog that produced this corpus — its SHA-256 is the
+`catalog_sha256` below, and the gate pins the two against each other, so anyone
+can reproduce a capture and verify the recorded digest. To capture a different
+model set, pass a Codex `/models` response (the shape Codex caches as
+`$CODEX_HOME/models_cache.json`) and record its digest. The catalog does not
+fully determine the body — 0.154.0 layers bundled `model_info` overrides on top
+of it, which is why the CLI version is the primary provenance key and the
+catalog digest is secondary.
 
 The script refuses, before starting anything, an output directory inside the
 repository or under a temporary filesystem, an exported `CODEX_HOME` holding

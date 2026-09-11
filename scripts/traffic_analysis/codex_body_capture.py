@@ -4,7 +4,6 @@ One command. No ChatGPT credentials, no quota, no network egress:
 
     python scripts/traffic_analysis/codex_body_capture.py \
       --model gpt-5.5 --model gpt-5.6-sol --transport http \
-      --catalog /path/to/models_cache.json \
       --out /mnt/scratch/tmp/codex-body-capture-$(date -u +%Y%m%d)
 
 How it stays isolated:
@@ -25,10 +24,18 @@ How it stays isolated:
 Why the catalog must be pinned: the Codex model manager invalidates its cache
 on a ``client_version`` mismatch and caches for 300 s, so a capture run always
 refetches ``/models`` from whatever base URL the provider names. The origin
-therefore serves an operator-supplied catalog file and records its digest as
-provenance. The catalog does not fully determine the body -- 0.154.0 layers
-bundled ``model_info`` overrides on top of it, which is why the CLI version is
-the primary provenance key.
+therefore serves a catalog file and records its digest as provenance.
+``--catalog`` defaults to ``DEFAULT_CATALOG``, the committed reference catalog
+that produced the fixture corpus; its digest is the ``catalog_sha256`` those
+provenance entries record, so any operator can reproduce a capture and verify
+the recorded digest. To capture against a different model set, point
+``--catalog`` at a Codex ``/models`` response -- the shape Codex itself caches
+as ``$CODEX_HOME/models_cache.json``, an object with a ``models`` array whose
+entries the client deserialises strictly. The catalog does not fully determine
+the body: 0.154.0 layers bundled ``model_info`` overrides on top of it (a row
+saying ``supports_search_tool: false`` still yields ``web_search`` and
+``tool_search`` declarations), which is why the CLI version is the primary
+provenance key and the catalog digest is secondary.
 
 What CI covers: the guards and the naming are pure functions
 (``tests/unit/test_codex_body_capture_guards.py``), and the origin is driven
@@ -77,6 +84,13 @@ except ModuleNotFoundError:  # Allow direct script execution.
     )
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+# The committed reference catalog, byte-identical to the one that produced the
+# fixtures in ``tests/fixtures/codex_bodies`` -- its SHA-256 is the
+# ``catalog_sha256`` those provenance entries record, pinned by the corpus gate.
+# Without it ``--catalog`` was a required flag with no documented source, no
+# schema and no sample, so nobody but the original operator could reproduce a
+# capture or verify the recorded digest.
+DEFAULT_CATALOG = Path(__file__).with_name("catalogs") / "codex-models-20260911.json"
 DEFAULT_PORT = 19090
 DEFAULT_PROMPT = "Return exactly CAPTURE_OK.\n"
 CAPTURE_TOKEN_VARIABLE = "CODEX_CAPTURE_TOKEN"
@@ -524,7 +538,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--model", action="append", required=True, metavar="SLUG", help="Repeatable model slug")
     parser.add_argument("--transport", choices=TRANSPORTS, default="http")
     parser.add_argument("--out", type=Path, required=True, help="Capture directory outside the repository")
-    parser.add_argument("--catalog", type=Path, required=True, help="Pinned /models catalog served to Codex")
+    parser.add_argument(
+        "--catalog",
+        type=Path,
+        default=DEFAULT_CATALOG,
+        help=(
+            "Pinned /models catalog served to Codex. Defaults to the committed reference catalog "
+            f"({DEFAULT_CATALOG.relative_to(REPO_ROOT)}); a real one is Codex's own "
+            "$CODEX_HOME/models_cache.json"
+        ),
+    )
     parser.add_argument("--prompt", default=DEFAULT_PROMPT)
     parser.add_argument("--codex-bin", default=shutil.which("codex"))
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
