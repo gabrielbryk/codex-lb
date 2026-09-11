@@ -678,8 +678,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             runs.append(
                 {
                     "model_slug": model_slug,
-                    # ``transport`` is the channel the body arrived on; the
-                    # requested one only configured the provider.
+                    # The record overwrites ``transport`` with the channel the
+                    # body arrived on; the requested value only configured the
+                    # provider, and remains here as the fallback for a run that
+                    # captured nothing.
                     "transport": args.transport,
                     "transport_requested": args.transport,
                     "exit_code": exit_code,

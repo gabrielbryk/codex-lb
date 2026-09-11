@@ -1,15 +1,18 @@
 ## 1. Capture lane
 
 - [x] 1.1 Add `scripts/traffic_analysis/codex_body_capture.py`: network-namespace re-exec, in-process origin serving a pinned catalog and the Responses lifecycle, throwaway `CODEX_HOME`, disposable provider token, per-slug/transport/run artifact naming, manifest with SHA-256 attestations, printed summary.
-- [x] 1.2 Add the refusals as pure functions raising before any process starts: `assert_output_outside_repo`, `assert_clean_environment`, `assert_home_uncredentialed`, `assert_loopback_base_url`, `assert_catalog_path`.
+- [x] 1.2 Add the refusals as pure functions raising before any process starts: `assert_output_outside_repo`, `assert_clean_environment` (including the outbound proxy family in both spellings, because the Codex client routes even a loopback POST through `HTTP_PROXY`), `assert_ambient_home_uncredentialed`, `assert_loopback_base_url`, `assert_catalog_path`.
 - [x] 1.3 Add behaviour-free public aliases to `origin_fixture` (`decode_request_body`, `response_events`, `sse_frames`, `loopback_host`) instead of duplicating the decode/lifecycle/loopback logic.
 - [x] 1.4 Cover the guards and the naming in `tests/unit/test_codex_body_capture_guards.py` (positive and refusing case each). CI never runs `codex` or `unshare`.
+- [x] 1.5 Serve both transports the client may choose, keep the turn frame rather than the `generate: false` prewarm, and key every artifact by the transport observed; cover the origin over both transports with a test client in `tests/unit/test_codex_body_capture_origin.py`.
+- [x] 1.6 Commit the reference `/models` catalog that produced the corpus as the `--catalog` default, with a catalogs README and a digest pinned against every captured provenance entry.
 
 ## 2. Sanitiser and privacy gate
 
 - [x] 2.1 Add `scripts/traffic_analysis/codex_body_sanitize.py`: positive top-level allowlist that fails closed, telemetry drops, identifier placeholders, message-content text rewrites, absence preservation, idempotence, headers sidecar.
 - [x] 2.2 Scope the text rewrite to message content so the Lite `additional_tools` bundle stays byte-identical (Codex's `spawn_agent` description documents `/root/<task>` agent namespaces that a catch-all path rewriter destroys).
-- [x] 2.3 Add `scripts/traffic_analysis/fixture_privacy_scan.py`: reuse `privacy_scan.scan_tree` for credential shapes; add the identifier pass with value-conditioned patterns so Codex's legitimate numeric `session_id` tool parameter never matches.
+- [x] 2.3 Add `scripts/traffic_analysis/fixture_privacy_scan.py`: reuse `privacy_scan.scan_tree` for credential shapes; add the identifier pass with value-conditioned patterns so Codex's legitimate numeric `session_id` tool parameter never matches; read the bare-telemetry-key exemptions from `provenance.json` so the documented strict command passes on a pristine checkout with no flags.
+- [x] 2.5 Keep the identity pass machine-independent: pin it in the committed gate, and skip host/account names that name no operator (container and CI defaults, Codex payload vocabulary) so the gate cannot report an unclearable finding and the sanitiser cannot rewrite `/root` out of real content.
 - [x] 2.4 Cover removal (against output bytes), preservation (byte equality and absence), idempotence and fail-closed in `tests/unit/test_codex_body_sanitizer.py`.
 
 ## 3. Corpus, provenance and the gate
@@ -26,7 +29,7 @@
 
 - [x] 4.1 `compatibility-tooling` delta: carve the committed-fixture exception out of the version-control prohibition; add the isolated capture lane requirement with its refusals.
 - [x] 4.2 `model-source-routing` delta: the corpus must record provenance and the gate must assert the recorded verdict.
-- [x] 4.3 `docs/traffic-parity.md` section, cross-linked with the fixture README.
+- [x] 4.3 `docs/traffic-parity.md` section, cross-linked with the fixture README, with every command in the `uv run python -m` form the rest of the document already uses (a bare `python` is neither present nor sufficient on a typical host).
 - [x] 4.4 `openspec validate capture-codex-body-fixtures --strict`, ruff, ty, targeted suites.
 
 ## 5. Follow-ups (not this change)

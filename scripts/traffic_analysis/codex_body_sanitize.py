@@ -24,6 +24,11 @@ Three rules, in tension, decided in this order:
 
 ``tools`` is byte-preserved: it is Codex-generated, carries no operator data,
 and is the load-bearing evidence for the tool-declaration portability gaps.
+
+A websocket capture is persisted verbatim, so it arrives with the transport's
+frame envelope (``type``) around the Responses body. That envelope is removed
+here -- it is not a Responses field -- while ``generate``, which the frame does
+carry as a Responses field, is preserved like any other Codex-emitted value.
 """
 
 from __future__ import annotations
