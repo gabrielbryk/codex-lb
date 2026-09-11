@@ -99,6 +99,31 @@ FORBIDDEN_ENVIRONMENT_VARIABLES: frozenset[str] = frozenset(
 )
 FORBIDDEN_ENVIRONMENT_PREFIXES: tuple[str, ...] = ("CODEX_LB_",)
 
+# The outbound proxy family, matched case-insensitively because both spellings
+# are honoured. These are not merely untidy: the Codex client routes even a
+# ``http://127.0.0.1:<port>/v1`` POST through ``HTTP_PROXY`` and does not bypass
+# loopback, so a capture run in a proxied shell captures nothing -- and under
+# ``--no-network-namespace`` it delivers the whole request body (cwd, AGENTS.md,
+# skills inventory, prompt) to whatever host the variable names. ``no_proxy`` is
+# refused with the rest because it is the same configuration surface: its
+# presence says a proxy configuration reached this shell.
+#
+# Pinned in the guard tests against ``app.core.utils.proxy_env``, which is where
+# the production side of the same list lives; this module stays app-free so the
+# tooling runs on a checkout without the application environment.
+FORBIDDEN_PROXY_ENVIRONMENT_VARIABLES: frozenset[str] = frozenset(
+    {
+        "all_proxy",
+        "ftp_proxy",
+        "http_proxy",
+        "https_proxy",
+        "no_proxy",
+        "socks_proxy",
+        "ws_proxy",
+        "wss_proxy",
+    }
+)
+
 # Storage policy: raw captures are long-lived multi-hundred-KB artifacts, and a
 # ``CODEX_HOME`` under ``/tmp`` also makes Codex refuse to create its helper
 # binaries ("Refusing to create helper binaries under temporary dir").
@@ -147,14 +172,20 @@ def assert_output_outside_repo(
     return resolved
 
 
+def is_forbidden_variable(name: str) -> bool:
+    """Whether ``name`` is an upstream pointer or an outbound proxy setting."""
+
+    return (
+        name in FORBIDDEN_ENVIRONMENT_VARIABLES
+        or name.startswith(FORBIDDEN_ENVIRONMENT_PREFIXES)
+        or name.casefold() in FORBIDDEN_PROXY_ENVIRONMENT_VARIABLES
+    )
+
+
 def assert_clean_environment(environment: Mapping[str, str]) -> None:
     """Refuse a shell carrying production, proxy or upstream configuration."""
 
-    offenders = sorted(
-        name
-        for name in environment
-        if name in FORBIDDEN_ENVIRONMENT_VARIABLES or name.startswith(FORBIDDEN_ENVIRONMENT_PREFIXES)
-    )
+    offenders = sorted(name for name in environment if is_forbidden_variable(name))
     if offenders:
         raise CaptureRefusal(
             "refusing to capture with production/proxy configuration in the environment: "
@@ -236,13 +267,14 @@ def capture_config_toml(*, model_slug: str, base_url: str, transport: str) -> st
 
 
 def capture_environment(environment: Mapping[str, str], *, home: Path) -> dict[str, str]:
-    """The child environment: the caller's, minus upstream pointers, plus the throwaway home."""
+    """The child environment: the caller's, minus upstream pointers, plus the throwaway home.
 
-    child = {
-        name: value
-        for name, value in environment.items()
-        if name not in FORBIDDEN_ENVIRONMENT_VARIABLES and not name.startswith(FORBIDDEN_ENVIRONMENT_PREFIXES)
-    }
+    Belt and braces with ``assert_clean_environment``: the refusal already ran,
+    but the spec requires that the child process never inherits one of these
+    even if a future caller reaches this function by another path.
+    """
+
+    child = {name: value for name, value in environment.items() if not is_forbidden_variable(name)}
     child["CODEX_HOME"] = str(home)
     child[CAPTURE_TOKEN_VARIABLE] = CAPTURE_TOKEN_VALUE
     return child

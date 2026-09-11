@@ -12,13 +12,16 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 import pytest
 
+from app.core.utils.proxy_env import STANDARD_OUTBOUND_PROXY_ENV_NAMES
 from scripts.traffic_analysis.codex_body_capture import (
     CAPTURE_TOKEN_VARIABLE,
     FORBIDDEN_ENVIRONMENT_PREFIXES,
     FORBIDDEN_ENVIRONMENT_VARIABLES,
+    FORBIDDEN_PROXY_ENVIRONMENT_VARIABLES,
     PROVIDER_NAME,
     REPO_ROOT,
     CaptureRefusal,
@@ -91,11 +94,35 @@ def test_an_upstream_pointer_in_the_environment_is_refused(variable: str) -> Non
         assert_clean_environment({variable: "value"})
 
 
-def test_a_proxy_configuration_prefix_in_the_environment_is_refused() -> None:
+def test_a_deployment_configuration_prefix_in_the_environment_is_refused() -> None:
     variable = f"{FORBIDDEN_ENVIRONMENT_PREFIXES[0]}UPSTREAM_BASE_URL"
 
     with pytest.raises(CaptureRefusal, match=variable):
         assert_clean_environment({variable: "https://example.invalid"})
+
+
+@pytest.mark.parametrize("spelling", [str.lower, str.upper])
+@pytest.mark.parametrize("variable", sorted(FORBIDDEN_PROXY_ENVIRONMENT_VARIABLES))
+def test_an_outbound_proxy_variable_in_the_environment_is_refused(variable: str, spelling: Any) -> None:
+    """Measured, not assumed: the Codex client routes even a loopback POST through ``HTTP_PROXY``.
+
+    A capture run with ``HTTP_PROXY`` set captures nothing, and under
+    ``--no-network-namespace`` the whole request body goes to the named host.
+    Both spellings are honoured by the client, so both must refuse.
+    """
+
+    name = spelling(variable)
+
+    with pytest.raises(CaptureRefusal, match=name):
+        assert_clean_environment({name: "http://127.0.0.1:1"})
+
+
+def test_the_refused_proxy_family_covers_the_names_production_reads() -> None:
+    """Drift guard against ``app.core.utils.proxy_env``, the other end of the same surface."""
+
+    assert FORBIDDEN_PROXY_ENVIRONMENT_VARIABLES >= set(STANDARD_OUTBOUND_PROXY_ENV_NAMES)
+    assert "no_proxy" in FORBIDDEN_PROXY_ENVIRONMENT_VARIABLES
+    assert all(name == name.casefold() for name in FORBIDDEN_PROXY_ENVIRONMENT_VARIABLES)
 
 
 # --- assert_home_uncredentialed -------------------------------------------------------
@@ -207,6 +234,23 @@ def test_the_child_environment_drops_upstream_pointers_and_names_the_throwaway_h
     assert child["CODEX_HOME"] == str(tmp_path)
     assert child[CAPTURE_TOKEN_VARIABLE]
     assert child["PATH"] == "/usr/bin"
+
+
+def test_the_child_environment_never_inherits_an_outbound_proxy_variable(tmp_path: Path) -> None:
+    """The spec's second half: the child process it would have started never inherits one."""
+
+    parent = {
+        "PATH": "/usr/bin",
+        "HTTP_PROXY": "http://proxy.invalid:8080",
+        "https_proxy": "http://proxy.invalid:8080",
+        "ALL_PROXY": "socks5://proxy.invalid:1080",
+        "NO_PROXY": "localhost",
+    }
+
+    child = capture_environment(parent, home=tmp_path)
+
+    assert [name for name in child if name.casefold().endswith("_proxy")] == []
+    assert_clean_environment(child)
 
 
 def test_the_body_summary_reports_the_facts_an_operator_checks() -> None:

@@ -239,9 +239,18 @@ Every refusal fires before any process starts: an `--out` inside the repository
 or under a temporary filesystem, a `CODEX_HOME` holding an `auth.json`, a shell
 carrying `CODEX_LB_*` / `OPENAI_API_KEY` / `OPENAI_BASE_URL` /
 `CHATGPT_BASE_URL` / `CODEX_ACCESS_TOKEN` / `CODEX_API_BASE_URL` /
-`CODEX_SESSION_ID`, a non-loopback origin, and a repository config file or
-`.env` passed as the catalog. `--no-network-namespace` exists for hosts without
-`unshare` and requires the explicit `--i-accept-network-egress` companion.
+`CODEX_SESSION_ID`, a shell carrying any outbound proxy variable
+(`HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` / `WS_PROXY` / `WSS_PROXY` /
+`SOCKS_PROXY` / `FTP_PROXY` / `NO_PROXY`, either spelling), a non-loopback
+origin, and a repository config file or `.env` passed as the catalog.
+`--no-network-namespace` exists for hosts without `unshare` and requires the
+explicit `--i-accept-network-egress` companion.
+
+The proxy refusal is not tidiness. The Codex client routes even its
+`http://127.0.0.1:<port>/v1` POST through `HTTP_PROXY` and does not bypass
+loopback: a run in a proxied shell captures nothing, and a run that also passed
+`--no-network-namespace` would deliver the whole request body — cwd, `AGENTS.md`
+text, skills inventory, prompt — to whatever host the variable names.
 
 Then sanitise and gate the result before committing it:
 

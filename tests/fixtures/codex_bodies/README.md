@@ -139,8 +139,15 @@ The script refuses, before starting anything, an output directory inside the
 repository or under a temporary filesystem, a `CODEX_HOME` holding an
 `auth.json`, a shell carrying `CODEX_LB_*` / `OPENAI_API_KEY` /
 `OPENAI_BASE_URL` / `CHATGPT_BASE_URL` / `CODEX_ACCESS_TOKEN` /
-`CODEX_API_BASE_URL` / `CODEX_SESSION_ID`, a non-loopback origin, and a
-repository config file or `.env` passed as the catalog.
+`CODEX_API_BASE_URL` / `CODEX_SESSION_ID`, a shell carrying any outbound proxy
+variable (`HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` / `WS_PROXY` / `WSS_PROXY`
+/ `SOCKS_PROXY` / `FTP_PROXY` / `NO_PROXY`, either spelling), a non-loopback
+origin, and a repository config file or `.env` passed as the catalog.
+
+The proxy refusal is load-bearing: the Codex client routes even its loopback
+POST through `HTTP_PROXY` and does not bypass `127.0.0.1`, so a proxied shell
+captures nothing — and with `--no-network-namespace` it would ship the whole
+request body to the proxy host instead.
 
 ## Pre-commit checklist
 
