@@ -200,6 +200,83 @@ organization name. ASN parity is comparable only when A and C use the same
 observer and exact database digest; it does not guarantee that a different
 destination uses the same policy route.
 
+### Capture a Codex request body for the portability fixtures
+
+The provider-portability gate for the subscription-overflow Model Source
+classifies real Codex request bodies. Capturing one needs no ChatGPT
+credentials, no upstream contact and no quota — it is a different lane from the
+parity capture above, because the body is recorded *in the origin* rather than
+at a TLS boundary:
+
+```bash
+python scripts/traffic_analysis/codex_body_capture.py \
+  --model gpt-5.5 --model gpt-5.6-sol --transport http \
+  --catalog /path/to/models_cache.json \
+  --out /mnt/scratch/tmp/codex-body-capture-$(date -u +%Y%m%d)
+```
+
+The script re-executes itself inside an unprivileged network namespace
+(`unshare --map-root-user --net`) and brings up loopback only, so external
+egress is kernel-impossible rather than merely unconfigured. Inside it, an
+in-process origin serves the operator-pinned `/models` catalog and a
+deterministic Responses lifecycle, and `codex exec` runs against it with a
+throwaway `CODEX_HOME`, a provider declaring `requires_openai_auth = false`,
+and a disposable `env_key` token. The origin persists the decoded request bytes
+itself, reusing `origin_fixture.decode_request_body` for the zstd request
+encoding, so no mitmproxy addon, TLS endpoint or `capture_body_mode` is
+involved.
+
+The catalog must be pinned to a file. The Codex model manager caches `/models`
+for 300 s and invalidates the cache on a `client_version` mismatch, so a run
+with a newer CLI always refetches from whatever base URL the provider names.
+Its SHA-256 is recorded as provenance — but it does not fully determine the
+body: 0.154.0 layers bundled `model_info` overrides on top of the served
+catalog (a row saying `supports_search_tool: false` still produces a body with
+`web_search` and `tool_search` declarations), which is why the CLI version is
+the primary provenance key.
+
+Every refusal fires before any process starts: an `--out` inside the repository
+or under a temporary filesystem, a `CODEX_HOME` holding an `auth.json`, a shell
+carrying `CODEX_LB_*` / `OPENAI_API_KEY` / `OPENAI_BASE_URL` /
+`CHATGPT_BASE_URL` / `CODEX_ACCESS_TOKEN` / `CODEX_API_BASE_URL` /
+`CODEX_SESSION_ID`, a non-loopback origin, and a repository config file or
+`.env` passed as the catalog. `--no-network-namespace` exists for hosts without
+`unshare` and requires the explicit `--i-accept-network-egress` companion.
+
+Then sanitise and gate the result before committing it:
+
+```bash
+python scripts/traffic_analysis/codex_body_sanitize.py \
+  --in  <capture-dir>/body-gpt-5.5-http-<stamp>.json \
+  --out tests/fixtures/codex_bodies/<name>.json \
+  --headers-in  <capture-dir>/headers-gpt-5.5-http-<stamp>.json \
+  --headers-out <capture-dir>/sanitised-headers.json \
+  --emit-redactions <capture-dir>/redactions.json
+
+python scripts/traffic_analysis/fixture_privacy_scan.py \
+  --root tests/fixtures/codex_bodies --strict
+```
+
+The sanitiser fails closed on an unreviewed top-level field, drops the Codex
+telemetry fields production also strips, replaces identifiers with fixed
+placeholders, and rewrites the operator strings inside message content: the
+`<environment_context>` paths, date, timezone and shell, the
+`# AGENTS.md instructions for <path>` heading, and the `<skills_instructions>`
+skill-root path and skill inventory — the last being the largest real leak and
+the one no credential scanner recognises. It never fabricates a key, because a
+real Responses-Lite body has no `instructions`, `tools` or `stream_options` and
+the portability view declines unknown top-level fields. `fixture_privacy_scan`
+adds an identifier pass on top of `privacy_scan`'s credential shapes, which
+passes a tree full of live UUIDs and workspace paths on its own.
+
+Never commit a `headers-*.json`: it holds the `authorization` line even when
+the token was disposable. Delete the raw capture directory in the same session.
+
+The corpus contract, the per-fixture provenance and the recorded verdicts are
+documented in
+[`tests/fixtures/codex_bodies/README.md`](https://github.com/Soju06/codex-lb/tree/main/tests/fixtures/codex_bodies/README.md),
+and gated by `tests/unit/test_codex_body_fixtures.py`.
+
 ### Controlled failure-path matrix
 
 The fixture defaults to the normal success path. To compare failure behavior,
