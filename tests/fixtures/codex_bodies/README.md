@@ -136,8 +136,8 @@ bundled `model_info` overrides on top of it, which is why the CLI version is
 the primary provenance key and the catalog digest is secondary.
 
 The script refuses, before starting anything, an output directory inside the
-repository or under a temporary filesystem, a `CODEX_HOME` holding an
-`auth.json`, a shell carrying `CODEX_LB_*` / `OPENAI_API_KEY` /
+repository or under a temporary filesystem, an exported `CODEX_HOME` holding
+an `auth.json`, a shell carrying `CODEX_LB_*` / `OPENAI_API_KEY` /
 `OPENAI_BASE_URL` / `CHATGPT_BASE_URL` / `CODEX_ACCESS_TOKEN` /
 `CODEX_API_BASE_URL` / `CODEX_SESSION_ID`, a shell carrying any outbound proxy
 variable (`HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` / `WS_PROXY` / `WSS_PROXY`

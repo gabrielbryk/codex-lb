@@ -65,8 +65,11 @@ so that external egress is impossible rather than unconfigured; disabling the
 namespace MUST require a second, explicit acknowledgement flag. The command
 MUST refuse, before starting any subprocess or server, an output directory
 inside the repository, under a temporary filesystem, or reached through a
-symlink; a Codex home directory holding stored credentials; an environment
-carrying proxy or upstream configuration; a non-loopback origin address; and a
+symlink; an exported Codex home directory holding stored credentials, which MUST
+be refused rather than silently overwritten by the throwaway home the run
+creates; an environment carrying proxy or upstream configuration, including any
+outbound proxy variable in either spelling, because the Codex client routes even
+a loopback request through it; a non-loopback origin address; and a
 repository configuration or environment file supplied as the model catalog. The
 model catalog MUST be pinned to a file and its digest recorded, because the
 Codex model manager refetches discovery whenever the client version differs
@@ -84,11 +87,13 @@ catalog and the catalog therefore does not determine the body.
   digest and per-artifact digests
 - **AND** no request leaves the loopback interface
 
-#### Scenario: The capture refuses a credentialed home
+#### Scenario: The capture refuses an exported credentialed home
 
-- **GIVEN** a Codex home directory containing stored credentials
-- **WHEN** the capture command is invoked against it
-- **THEN** the command refuses before starting the origin or the client
+- **GIVEN** an exported Codex home variable naming a directory that holds
+  stored credentials
+- **WHEN** the capture command runs
+- **THEN** the command refuses before creating the capture directory, the
+  throwaway home, the origin or the client
 - **AND** no capture artifact is written
 
 #### Scenario: The capture refuses an unsafe output location or catalog

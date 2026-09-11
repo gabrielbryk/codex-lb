@@ -236,7 +236,8 @@ catalog (a row saying `supports_search_tool: false` still produces a body with
 the primary provenance key.
 
 Every refusal fires before any process starts: an `--out` inside the repository
-or under a temporary filesystem, a `CODEX_HOME` holding an `auth.json`, a shell
+or under a temporary filesystem, an exported `CODEX_HOME` holding an
+`auth.json`, a shell
 carrying `CODEX_LB_*` / `OPENAI_API_KEY` / `OPENAI_BASE_URL` /
 `CHATGPT_BASE_URL` / `CODEX_ACCESS_TOKEN` / `CODEX_API_BASE_URL` /
 `CODEX_SESSION_ID`, a shell carrying any outbound proxy variable

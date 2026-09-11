@@ -15,8 +15,8 @@ How it stays isolated:
   a property of the sandbox, not of a code review.
 * **No credentials.** A throwaway ``CODEX_HOME`` and a provider with
   ``requires_openai_auth = false`` and a disposable ``env_key`` token. The
-  script refuses to start if the chosen home holds an ``auth.json`` or if the
-  environment carries any production/proxy variable.
+  script refuses to start if an exported ``CODEX_HOME`` holds an ``auth.json``
+  or if the environment carries any production/proxy variable.
 * **Captured in the origin, not in a proxy.** The loopback origin receives
   plaintext HTTP and persists the decoded request bytes itself, reusing
   ``origin_fixture.decode_request_body``. No TLS, no mitmproxy addon, no
@@ -201,6 +201,23 @@ def assert_home_uncredentialed(home: Path) -> None:
             f"refusing to capture with a credentialed CODEX_HOME: {home / 'auth.json'} exists. "
             "The capture lane uses a throwaway home and a disposable provider token."
         )
+
+
+def assert_ambient_home_uncredentialed(environment: Mapping[str, str]) -> None:
+    """Refuse an exported ``CODEX_HOME`` that holds ChatGPT credentials.
+
+    The run itself always uses a throwaway home, so the exported value is
+    overwritten rather than read. That is precisely why it must refuse loudly
+    instead of being silently ignored: an operator who exported a credentialed
+    home is asking for a capture this lane does not perform, and the lane's whole
+    claim is "no ChatGPT credentials". Checking only the throwaway home -- which
+    ``tempfile.mkdtemp`` created moments earlier and which therefore can never
+    hold an ``auth.json`` -- made the guard unreachable by construction.
+    """
+
+    home = environment.get("CODEX_HOME")
+    if home:
+        assert_home_uncredentialed(Path(home).expanduser())
 
 
 def assert_loopback_base_url(base_url: str) -> None:
@@ -465,12 +482,20 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _preflight(args: argparse.Namespace) -> tuple[Path, Path, str]:
+def preflight(args: argparse.Namespace, environment: Mapping[str, str] | None = None) -> tuple[Path, Path, str]:
+    """Every refusal, in order, before any directory, server or subprocess exists.
+
+    ``environment`` is injectable so a test can assert the ordering against a
+    known shell rather than against the one it happens to run in.
+    """
+
+    environment = os.environ if environment is None else environment
     if args.no_network_namespace and not args.i_accept_network_egress:
         raise CaptureRefusal("--no-network-namespace requires --i-accept-network-egress")
     if not args.codex_bin:
         raise CaptureRefusal("codex binary not found; pass --codex-bin")
-    assert_clean_environment(os.environ)
+    assert_clean_environment(environment)
+    assert_ambient_home_uncredentialed(environment)
     destination = assert_output_outside_repo(args.out)
     catalog = assert_catalog_path(args.catalog)
     base_url = f"http://127.0.0.1:{args.port}/v1"
@@ -482,7 +507,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     raw_argv = list(sys.argv[1:] if argv is None else argv)
     args = build_parser().parse_args(raw_argv)
     try:
-        destination, catalog, base_url = _preflight(args)
+        destination, catalog, base_url = preflight(args)
     except CaptureRefusal as exc:
         print(f"Refusing to capture: {exc}", file=sys.stderr)
         return 2
@@ -499,7 +524,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     home = Path(tempfile.mkdtemp(prefix="codex-capture-home-", dir=destination))
     workdir = Path(tempfile.mkdtemp(prefix="codex-capture-work-", dir=destination))
     try:
-        assert_home_uncredentialed(home)
         atomic_write_text(
             workdir / "AGENTS.md",
             "Run the unit tests before declaring a change done.\n",

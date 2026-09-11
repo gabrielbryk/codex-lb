@@ -26,15 +26,18 @@ from scripts.traffic_analysis.codex_body_capture import (
     REPO_ROOT,
     CaptureRefusal,
     CaptureTarget,
+    assert_ambient_home_uncredentialed,
     assert_catalog_path,
     assert_clean_environment,
     assert_home_uncredentialed,
     assert_loopback_base_url,
     assert_output_outside_repo,
     body_summary,
+    build_parser,
     capture_artifact_name,
     capture_config_toml,
     capture_environment,
+    preflight,
 )
 
 pytestmark = pytest.mark.unit
@@ -137,6 +140,57 @@ def test_a_credentialed_home_is_refused(tmp_path: Path) -> None:
 
     with pytest.raises(CaptureRefusal, match="credentialed CODEX_HOME"):
         assert_home_uncredentialed(tmp_path)
+
+
+def test_an_exported_credentialed_codex_home_is_refused(tmp_path: Path) -> None:
+    """The reachable form of the guard: the run overwrites ``CODEX_HOME``, so it must refuse it.
+
+    Checking only the throwaway home made the refusal unreachable by
+    construction -- ``tempfile.mkdtemp`` had created it three lines earlier, so
+    no ``auth.json`` could exist -- and an operator who exported a credentialed
+    home was silently ignored rather than refused.
+    """
+
+    (tmp_path / "auth.json").write_text('{"tokens": {}}', encoding="utf-8")
+
+    with pytest.raises(CaptureRefusal, match="credentialed CODEX_HOME"):
+        assert_ambient_home_uncredentialed({"CODEX_HOME": str(tmp_path)})
+
+
+def test_an_exported_uncredentialed_codex_home_is_accepted(tmp_path: Path) -> None:
+    """Only credentials refuse: an exported home is otherwise just overwritten."""
+
+    assert_ambient_home_uncredentialed({"CODEX_HOME": str(tmp_path)})
+    assert_ambient_home_uncredentialed({"CODEX_HOME": ""})
+    assert_ambient_home_uncredentialed({})
+
+
+def test_preflight_refuses_an_exported_credentialed_home_before_creating_anything(tmp_path: Path) -> None:
+    """The guard has to fire from the command, not only from a unit call."""
+
+    home = tmp_path / "codex-home"
+    home.mkdir()
+    (home / "auth.json").write_text('{"tokens": {}}', encoding="utf-8")
+    catalog = tmp_path / "models_cache.json"
+    catalog.write_text('{"models": []}', encoding="utf-8")
+    destination = tmp_path / "captures"
+    args = build_parser().parse_args(
+        [
+            "--model",
+            "gpt-5.5",
+            "--out",
+            str(destination),
+            "--catalog",
+            str(catalog),
+            "--codex-bin",
+            "/usr/bin/true",
+        ]
+    )
+
+    with pytest.raises(CaptureRefusal, match="credentialed CODEX_HOME"):
+        preflight(args, {"PATH": "/usr/bin", "CODEX_HOME": str(home)})
+
+    assert not destination.exists()
 
 
 # --- assert_loopback_base_url ---------------------------------------------------------
