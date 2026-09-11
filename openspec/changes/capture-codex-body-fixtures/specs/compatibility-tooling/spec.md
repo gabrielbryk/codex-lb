@@ -100,6 +100,8 @@ catalog and the catalog therefore does not determine the body.
   chooses them
 - **WHEN** the client primes the request context and then sends the turn
 - **THEN** the captured body is the frame carrying the transcript
+- **AND** the priming frame is retained under its own artifact name, because on
+  the Responses-Lite lane it is where the additional-tools bundle travels
 - **AND** the manifest records the transport the body arrived on, so a run that
   fell back to HTTP is not reported as a websocket capture
 

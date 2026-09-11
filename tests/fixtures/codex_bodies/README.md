@@ -137,10 +137,17 @@ wrote: .../{body,headers}-*.json, manifest.json
 0.154.0. The origin serves both transports because the generated provider only
 *offers* websockets and the client decides; the websocket lane primes the
 context with a `generate: false` frame before sending the turn, so the capture
-keeps the frame carrying the transcript. The artifact name and the manifest
-record the transport the body arrived on, so an HTTP fallback is never reported
-as a websocket capture. A websocket body is persisted verbatim with its frame
-envelope, which the sanitiser removes (`websocket_envelope_dropped`).
+keeps the frame carrying the transcript as the body and writes the prewarm to a
+separate `prewarm-*.json`. Keep both when capturing a Lite body: its turn frame
+is ~8 KB with no `additional_tools` item, because the tool bundle travelled in
+the prewarm. The artifact name and the manifest record the transport the body
+arrived on, so an HTTP fallback is never reported as a websocket capture. A
+websocket body is persisted verbatim with its frame envelope, which the
+sanitiser removes (`websocket_envelope_dropped`).
+
+The two committed captures are HTTP, where Codex sends exactly one POST that
+carries both the transcript and the tool surface — which is why they are the
+corpus and the websocket lane is a tool, not a second fixture pair.
 
 The catalog must be pinned: the Codex model manager invalidates its cache on a
 `client_version` mismatch, so every run refetches `/models` from the provider's
@@ -187,8 +194,8 @@ request body to the proxy host instead.
 7. `uv run pytest -p no:cacheprovider -q tests/unit/test_codex_body_fixtures.py tests/unit/test_codex_body_sanitizer.py tests/unit/test_codex_body_capture_guards.py tests/unit/test_codex_body_capture_origin.py tests/unit/test_model_sources_projection.py tests/unit/test_replay_safety_portability.py`
 8. `ruff check`, `ruff format`, `ty check`.
 9. Delete the raw capture directory in the same session. Never commit a
-   `headers-*.json`: it holds the `authorization` line even when the token was
-   disposable.
+   `headers-*.json` (it holds the `authorization` line even when the token was
+   disposable) or a raw `body-*.json` / `prewarm-*.json`.
 
 ## Limitations
 

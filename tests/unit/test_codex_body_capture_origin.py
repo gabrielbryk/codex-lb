@@ -137,6 +137,32 @@ def test_a_websocket_run_captures_the_turn_and_not_the_prewarm(tmp_path: Path) -
     assert turn["summary"]["item_sequence"] == ["message/developer", "message/user"]
 
 
+def test_the_prewarm_frame_is_kept_under_its_own_name(tmp_path: Path) -> None:
+    """It is not noise: on the Lite websocket lane the prewarm carries the tool bundle.
+
+    Measured against 0.154.0 — the `gpt-5.6-sol` websocket turn frame is 8 KB
+    with no `additional_tools` item at all, because the bundle travelled in the
+    prewarm. Discarding it would lose the tool surface the portability verdict
+    is about.
+    """
+
+    client, captured, destination = _origin(tmp_path, slug="gpt-5.6-sol", transport="websocket")
+    bundle: list[dict[str, Any]] = [{"type": "additional_tools", "role": "developer"}]
+    prewarm = _prewarm_frame("gpt-5.6-sol") | {"input": bundle}
+
+    with client.websocket_connect("/v1/responses") as websocket:
+        websocket.send_text(json.dumps(prewarm))
+        websocket.send_text(json.dumps(_turn_frame("gpt-5.6-sol")))
+        assert websocket.receive_json()["type"]
+
+    prewarm_path = destination / f"prewarm-gpt-5.6-sol-websocket-{_STAMP}.json"
+    assert json.loads(prewarm_path.read_text(encoding="utf-8"))["input"] == bundle
+    record = next(entry for entry in captured if entry.get("prewarm"))
+    assert record["prewarm_summary"]["item_sequence"] == ["additional_tools/developer"]
+    assert record["extra_turn"] is True  # never mistaken for the captured body
+    assert "body" not in record
+
+
 def test_the_websocket_frame_is_persisted_verbatim_envelope_included(tmp_path: Path) -> None:
     """The frame *is* the request body on this transport; the capture rewrites no bytes."""
 

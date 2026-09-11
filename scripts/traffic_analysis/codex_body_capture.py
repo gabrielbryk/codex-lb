@@ -392,8 +392,23 @@ def _build_origin(
         body_path = destination / capture_artifact_name("body", observed, started_at)
         headers_path = destination / capture_artifact_name("headers", observed, started_at)
         if not is_turn_body(payload):
-            # A context prewarm, not a turn: no transcript to capture.
-            captured.append({**record, "prewarm": True})
+            # A context prewarm, not a turn. It is still evidence and is kept
+            # under its own name: on the Responses-Lite websocket lane the
+            # prewarm is where the ``additional_tools`` bundle travels, so the
+            # turn frame alone would lose the tool surface entirely.
+            prewarm_path = destination / capture_artifact_name("prewarm", observed, started_at)
+            if prewarm_path.exists():
+                captured.append({**record, "prewarm": True})
+                return
+            prewarm_path.write_bytes(decoded)
+            captured.append(
+                {
+                    **record,
+                    "prewarm": True,
+                    "prewarm_body": file_attestation("prewarm", prewarm_path),
+                    "prewarm_summary": body_summary(payload),
+                }
+            )
             return
         if body_path.exists():
             # A retry or a second turn: keep the first body, never overwrite it.
@@ -675,6 +690,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                 (item for item in reversed(captured) if item["model_slug"] == model_slug and not item["extra_turn"]),
                 None,
             )
+            prewarm = next(
+                (item for item in captured if item["model_slug"] == model_slug and item.get("prewarm_body")),
+                None,
+            )
             runs.append(
                 {
                     "model_slug": model_slug,
@@ -685,6 +704,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "transport": args.transport,
                     "transport_requested": args.transport,
                     "exit_code": exit_code,
+                    **{key: value for key, value in (prewarm or {}).items() if key.startswith("prewarm")},
                     **(record or {}),
                 }
             )
@@ -704,6 +724,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                 f"                 tools={summary['tool_types']} items={summary['item_sequence']} "
                 f"instructions={'present' if summary['instructions_present'] else 'ABSENT'}"
             )
+            if prewarm is not None:
+                prewarm_summary = prewarm["prewarm_summary"]
+                print(
+                    f"                 prewarm {prewarm['prewarm_body']['bytes']} B "
+                    f"tools={prewarm_summary['tool_types']} items={prewarm_summary['item_sequence']}"
+                )
         server.should_exit = True
         thread.join(timeout=10.0)
         manifest = {
@@ -718,7 +744,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             "runs": runs,
         }
         atomic_write_json(destination / "manifest.json", manifest)
-        print(f"wrote: {destination}/{{body,headers}}-*.json, manifest.json")
+        print(f"wrote: {destination}/{{body,headers,prewarm}}-*.json, manifest.json")
         print(
             "next: uv run python -m scripts.traffic_analysis.codex_body_sanitize "
             f"--in {destination}/body-<slug>-<transport>-<stamp>.json --out <fixture>.json"
