@@ -278,7 +278,10 @@ carrying `CODEX_LB_*` / `OPENAI_API_KEY` / `OPENAI_BASE_URL` /
 `SOCKS_PROXY` / `FTP_PROXY` / `NO_PROXY`, either spelling), a non-loopback
 origin, and a repository config file or `.env` passed as the catalog.
 `--no-network-namespace` exists for hosts without `unshare` and requires the
-explicit `--i-accept-network-egress` companion.
+explicit `--i-accept-network-egress` companion. The isolation refusal is the one
+exception to "before any process starts", and necessarily so: it can only be
+made *inside* the namespace, so it fires in the re-executed child — still before
+the capture directory, the origin or `codex` exist.
 
 The proxy refusal is not tidiness. The Codex client routes even its
 `http://127.0.0.1:<port>/v1` POST through `HTTP_PROXY` and does not bypass

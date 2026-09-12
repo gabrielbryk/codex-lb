@@ -175,7 +175,10 @@ an `auth.json`, a shell carrying `CODEX_LB_*` / `OPENAI_API_KEY` /
 `CODEX_API_BASE_URL` / `CODEX_SESSION_ID`, a shell carrying any outbound proxy
 variable (`HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` / `WS_PROXY` / `WSS_PROXY`
 / `SOCKS_PROXY` / `FTP_PROXY` / `NO_PROXY`, either spelling), a non-loopback
-origin, and a repository config file or `.env` passed as the catalog.
+origin, and a repository config file or `.env` passed as the catalog. It also
+refuses a namespace that is not loopback-only, which can only be checked from
+inside it and therefore fires in the re-executed child — still before the
+capture directory, the origin or `codex` exist.
 
 The proxy refusal is load-bearing: the Codex client routes even its loopback
 POST through `HTTP_PROXY` and does not bypass `127.0.0.1`, so a proxied shell
