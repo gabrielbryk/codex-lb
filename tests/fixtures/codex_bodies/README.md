@@ -111,7 +111,10 @@ The script re-executes itself inside an unprivileged network namespace
 (`unshare --map-root-user --net`), brings up loopback only, serves the pinned
 catalog and a Responses lifecycle from an in-process origin, and runs
 `codex exec` against it with a throwaway `CODEX_HOME` and a disposable
-provider token. External egress is kernel-impossible, not merely unconfigured.
+provider token. External egress is kernel-impossible, not merely unconfigured —
+and the run proves it rather than asserting it: it asks the kernel for this
+namespace's interfaces and refuses to capture if anything but loopback answers.
+The observed list goes into the manifest as `network_isolation`.
 
 `uv run` is load-bearing: the origin is FastAPI plus uvicorn and the request
 decoder is `zstandard`, so a bare system interpreter fails at import — and on
@@ -121,7 +124,7 @@ many hosts `python` is not a command at all. The tools need codex-lb
 Expected output:
 
 ```text
-network namespace: loopback only (unshare --net)
+network isolation: loopback only (observed interfaces: lo)
 capture origin: http://127.0.0.1:19090/v1 (health ok)
 catalog: codex-models-20260911.json sha256=de111010...
 codex: codex-cli 0.154.0

@@ -11,22 +11,30 @@ is covered next door, in ``test_codex_body_capture_origin.py``.
 
 from __future__ import annotations
 
+import json
 import os
+import shutil
+import subprocess
+import sys
+from collections.abc import Sequence
 from datetime import UTC, datetime
+from functools import cache
 from pathlib import Path
 from typing import Any
 
 import pytest
 
 from app.core.utils.proxy_env import STANDARD_OUTBOUND_PROXY_ENV_NAMES
+from scripts.traffic_analysis import codex_body_capture
 from scripts.traffic_analysis.codex_body_capture import (
     CAPTURE_TOKEN_VARIABLE,
     DEFAULT_CATALOG,
     FORBIDDEN_ENVIRONMENT_PREFIXES,
     FORBIDDEN_ENVIRONMENT_VARIABLES,
     FORBIDDEN_PROXY_ENVIRONMENT_VARIABLES,
+    LOOPBACK_INTERFACE_NAMES,
     PROVIDER_NAME,
-    REEXEC_MARKER,
+    REEXEC_FLAG,
     REPO_ROOT,
     CaptureRefusal,
     CaptureTarget,
@@ -41,13 +49,22 @@ from scripts.traffic_analysis.codex_body_capture import (
     capture_artifact_name,
     capture_config_toml,
     capture_environment,
+    main,
+    network_isolation,
+    observed_network_interfaces,
     preflight,
+    reexec_command,
     reexec_environment,
 )
 
 pytestmark = pytest.mark.unit
 
 _STARTED_AT = datetime(2026, 9, 11, 17, 29, 52, tzinfo=UTC)
+
+# The environment variable that used to carry "already inside the namespace".
+# It appears in no source file any more, and this literal is what keeps it that
+# way: an inherited export of it must not change what the run does.
+_RETIRED_REEXEC_MARKER = "CODEX_BODY_CAPTURE_NETNS"
 
 
 # --- assert_output_outside_repo -------------------------------------------------------
@@ -333,7 +350,186 @@ def test_the_namespace_reexec_keeps_this_repository_first_on_the_import_path() -
 
     assert pinned["PYTHONPATH"] == str(REPO_ROOT)
     assert appended["PYTHONPATH"] == f"{REPO_ROOT}{os.pathsep}/elsewhere"
-    assert pinned[REEXEC_MARKER] == "1" and appended[REEXEC_MARKER] == "1"
+    # The child is told it is inside the namespace on its command line, never
+    # through an inheritable variable.
+    assert _RETIRED_REEXEC_MARKER not in pinned
+
+
+# --- the network-namespace attestation ------------------------------------------------
+
+
+@cache
+def _unprivileged_netns_available() -> bool:
+    if shutil.which("unshare") is None or shutil.which("ip") is None:
+        return False
+    probe = subprocess.run(
+        ["unshare", "--map-root-user", "--net", "true"],
+        capture_output=True,
+        check=False,
+        stdin=subprocess.DEVNULL,
+    )
+    return probe.returncode == 0
+
+
+def _capture_argv(destination: Path, catalog: Path, *extra: str) -> list[str]:
+    """The documented command line, minus the flags a test varies."""
+
+    return [
+        "--model",
+        "gpt-5.5",
+        "--out",
+        str(destination),
+        "--catalog",
+        str(catalog),
+        "--codex-bin",
+        "/usr/bin/true",
+        *extra,
+    ]
+
+
+@pytest.fixture
+def reachable_capture(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, Path]:
+    """An ``--out`` and a catalog that satisfy preflight, so a test can reach the re-exec.
+
+    ``tmp_path`` is under ``/tmp``, which the storage policy refuses; that
+    refusal has its own tests above and is pinned away here rather than
+    reimplemented.
+    """
+
+    monkeypatch.setattr(codex_body_capture, "FORBIDDEN_OUTPUT_ROOTS", ("/nonexistent",))
+    catalog = tmp_path / "models_cache.json"
+    catalog.write_text('{"models": [{"slug": "gpt-5.5"}]}', encoding="utf-8")
+    return tmp_path / "captures", catalog
+
+
+def test_an_inherited_marker_cannot_skip_the_namespace_reexec(
+    reachable_capture: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Observed through ``main``: the run re-executes, it does not capture unisolated.
+
+    Reproduced twice before the fix. ``CODEX_BODY_CAPTURE_NETNS=1`` exported in
+    the shell -- a leftover from a previous debugging session, or from a nested
+    invocation -- made ``main`` skip the ``unshare`` re-exec entirely, run the
+    capture on the host network, and still print ``loopback only`` and record
+    ``network_namespace: true`` in the manifest. The marker now travels on the
+    command line, where nothing can inherit it.
+    """
+
+    destination, catalog = reachable_capture
+    monkeypatch.setenv(_RETIRED_REEXEC_MARKER, "1")
+    reexecs: list[list[str]] = []
+    monkeypatch.setattr(
+        codex_body_capture,
+        "_reexec_in_network_namespace",
+        lambda argv: (reexecs.append(list(argv)), 0)[1],
+    )
+    argv = _capture_argv(destination, catalog)
+
+    exit_code = main(argv, environment={"PATH": "/usr/bin"})
+
+    assert exit_code == 0
+    assert reexecs == [argv], "the run captured without re-executing into a network namespace"
+    assert not destination.exists(), "the unisolated parent process must capture nothing"
+
+
+def test_the_reexec_child_is_told_on_its_command_line_and_does_not_loop(
+    reachable_capture: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The flag the parent appends is the one that stops the child re-executing."""
+
+    destination, catalog = reachable_capture
+    command = reexec_command(["--model", "gpt-5.5"], executable="/usr/bin/python3")
+
+    assert command[:4] == ["unshare", "--map-root-user", "--net", "--"]
+    assert "ip link set lo up" in " ".join(command)
+    assert command[-1] == REEXEC_FLAG
+
+    monkeypatch.setattr(
+        codex_body_capture,
+        "_reexec_in_network_namespace",
+        lambda argv: pytest.fail(f"the child re-executed itself: {argv}"),
+    )
+
+    main(_capture_argv(destination, catalog, REEXEC_FLAG), environment={"PATH": "/usr/bin"})
+
+
+def test_the_attestation_reads_the_running_namespace(
+    reachable_capture: tuple[Path, Path], capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A run that reaches a routable interface refuses instead of attesting isolation.
+
+    Measured against the machine running the suite: any host with an uplink has
+    an interface beyond loopback, so ``REEXEC_FLAG`` alone -- the state an
+    inherited marker used to produce -- cannot buy the attestation.
+    """
+
+    destination, catalog = reachable_capture
+    routable = [name for name in observed_network_interfaces() if name not in LOOPBACK_INTERFACE_NAMES]
+    if not routable:  # pragma: no cover - the suite is already inside an isolated namespace
+        pytest.skip("this host is already loopback-only")
+
+    exit_code = main(_capture_argv(destination, catalog, REEXEC_FLAG), environment={"PATH": "/usr/bin"})
+
+    assert exit_code == 2
+    assert "network isolation is not in effect" in capsys.readouterr().err
+    assert not destination.exists()
+
+
+def test_the_attestation_records_the_interfaces_it_observed() -> None:
+    """The manifest field is evidence, not an echo of ``--no-network-namespace``."""
+
+    isolated = network_isolation(requested=True, interfaces=("lo",))
+    assert isolated == {"requested": True, "loopback_only": True, "interfaces": ["lo"]}
+
+    with pytest.raises(CaptureRefusal, match="network isolation is not in effect"):
+        network_isolation(requested=True, interfaces=("eth0", "lo"))
+
+    opted_out = network_isolation(requested=False, interfaces=("eth0", "lo"))
+    assert opted_out == {"requested": False, "loopback_only": False, "interfaces": ["eth0", "lo"]}
+
+
+@pytest.mark.skipif(
+    not _unprivileged_netns_available(), reason="unprivileged network namespaces are unavailable on this host"
+)
+def test_the_observation_reports_loopback_only_inside_a_real_namespace() -> None:
+    """The verifier is exercised where it matters: inside the namespace the lane creates.
+
+    ``/sys/class/net`` still lists the host's interfaces in here, because
+    ``unshare --net`` creates no mount namespace and sysfs stays bound to the one
+    it was mounted in. ``socket.if_nameindex`` asks the kernel over netlink and
+    answers for this namespace, which is why the observation uses it.
+    """
+
+    snippet = (
+        "import json;"
+        "from scripts.traffic_analysis.codex_body_capture import observed_network_interfaces;"
+        "print(json.dumps(list(observed_network_interfaces())))"
+    )
+    command: Sequence[str] = [
+        "unshare",
+        "--map-root-user",
+        "--net",
+        "--",
+        "sh",
+        "-c",
+        'ip link set lo up && exec "$@"',
+        "sh",
+        sys.executable,
+        "-c",
+        snippet,
+    ]
+
+    completed = subprocess.run(
+        command,
+        env=reexec_environment(os.environ),
+        capture_output=True,
+        text=True,
+        check=True,
+        stdin=subprocess.DEVNULL,
+    )
+
+    assert json.loads(completed.stdout.strip().splitlines()[-1]) == ["lo"]
+    assert observed_network_interfaces() != ("lo",), "the host under test would make this vacuous"
 
 
 def test_the_body_summary_reports_the_facts_an_operator_checks() -> None:

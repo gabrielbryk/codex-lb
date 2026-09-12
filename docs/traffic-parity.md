@@ -216,7 +216,12 @@ uv run python -m scripts.traffic_analysis.codex_body_capture \
 
 The script re-executes itself inside an unprivileged network namespace
 (`unshare --map-root-user --net`) and brings up loopback only, so external
-egress is kernel-impossible rather than merely unconfigured. Inside it, an
+egress is kernel-impossible rather than merely unconfigured. It then *verifies*
+that: before capturing anything it asks the kernel which interfaces the
+namespace has (`socket.if_nameindex`, which is namespace-aware — `/sys/class/net`
+is not) and refuses if anything but loopback is reachable. The manifest records
+the interface list it observed, so `network_isolation` is evidence rather than a
+restatement of the flags the run was given. Inside it, an
 in-process origin serves the operator-pinned `/models` catalog and a
 deterministic Responses lifecycle, and `codex exec` runs against it with a
 throwaway `CODEX_HOME`, a provider declaring `requires_openai_auth = false`,

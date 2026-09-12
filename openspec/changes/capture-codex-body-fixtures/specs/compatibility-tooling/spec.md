@@ -70,6 +70,11 @@ that carries the transcript. Isolation MUST be
 enforced by an unprivileged network namespace whose only interface is loopback,
 so that external egress is impossible rather than unconfigured; disabling the
 namespace MUST require a second, explicit acknowledgement flag. The command
+MUST determine whether that isolation holds by observing the interfaces its own
+network namespace has, MUST refuse to capture when any interface beyond loopback
+is present, and MUST record the observed interfaces in the manifest; no
+environment variable may suppress the isolation, and the recorded attestation
+MUST NOT be derived from the flags the run was given. The command
 MUST refuse, before starting any subprocess or server, an output directory
 inside the repository, under a temporary filesystem, or reached through a
 symlink; an exported Codex home directory holding stored credentials, which MUST
@@ -128,6 +133,16 @@ catalog and the catalog therefore does not determine the body.
   variable
 - **THEN** the command refuses and names every offending variable
 - **AND** the child process it would have started never inherits one
+
+#### Scenario: The capture refuses to attest isolation it cannot observe
+
+- **GIVEN** an invoking environment carrying any variable that a previous
+  version treated as "already inside the network namespace"
+- **WHEN** the capture command runs without an explicit egress acknowledgement
+- **THEN** the command still re-executes itself into a network namespace
+- **AND** a run that finds an interface beyond loopback refuses before creating
+  the capture directory, the origin or the client
+- **AND** no manifest claims isolation that was not observed
 
 ### Requirement: Captured bodies are sanitised by a positive allowlist before commit
 

@@ -6,6 +6,7 @@
 - [x] 1.4 Cover the guards and the naming in `tests/unit/test_codex_body_capture_guards.py` (positive and refusing case each). CI never runs `codex` or `unshare`.
 - [x] 1.5 Serve both transports the client may choose, keep the turn frame rather than the `generate: false` prewarm, and key every artifact by the transport observed; cover the origin over both transports with a test client in `tests/unit/test_codex_body_capture_origin.py`.
 - [x] 1.6 Commit the reference `/models` catalog that produced the corpus as the `--catalog` default, with a catalogs README and a digest pinned against every captured provenance entry.
+- [x] 1.7 Make the isolation attestation an observation: carry "already inside the namespace" on the child's command line instead of in an inheritable environment variable, read the namespace's interfaces from the kernel before capturing, refuse when anything but loopback answers, and record the observed list in the manifest as `network_isolation`.
 
 ## 2. Sanitiser and privacy gate
 

@@ -8,10 +8,12 @@ One command. No ChatGPT credentials, no quota, no network egress:
 
 How it stays isolated:
 
-* **Kernel-enforced.** The script re-executes itself inside an unprivileged
-  network namespace (``unshare --map-root-user --net`` plus ``ip link set lo
-  up``), so loopback is the only reachable network. "No upstream Codex call" is
-  a property of the sandbox, not of a code review.
+* **Kernel-enforced, and verified by observation.** The script re-executes
+  itself inside an unprivileged network namespace (``unshare --map-root-user
+  --net`` plus ``ip link set lo up``), then asks the kernel which interfaces
+  that namespace has and refuses to capture unless loopback is the only one. "No
+  upstream Codex call" is a property of the sandbox that the run measures, not a
+  restatement of the flags it was given.
 * **No credentials.** A throwaway ``CODEX_HOME`` and a provider with
   ``requires_openai_auth = false`` and a disposable ``env_key`` token. The
   script refuses to start if an exported ``CODEX_HOME`` holds an ``auth.json``
@@ -56,6 +58,7 @@ import argparse
 import json
 import os
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
@@ -102,7 +105,18 @@ DEFAULT_PROMPT = "Return exactly CAPTURE_OK.\n"
 CAPTURE_TOKEN_VARIABLE = "CODEX_CAPTURE_TOKEN"
 CAPTURE_TOKEN_VALUE = "non-secret-capture-token"
 PROVIDER_NAME = "capture-origin"
-REEXEC_MARKER = "CODEX_BODY_CAPTURE_NETNS"
+# How the re-executed child learns it is already inside the namespace. It is an
+# argument rather than an environment variable on purpose: the previous marker
+# (``CODEX_BODY_CAPTURE_NETNS=1``) was inherited from the operator's shell, so a
+# stale export skipped the re-exec while the run still printed and recorded
+# "loopback only". An argv flag cannot be exported, and the attestation below is
+# an observation of the namespace rather than a restatement of this flag.
+REEXEC_FLAG = "--already-in-network-namespace"
+# Loopback under either spelling the platforms use.
+LOOPBACK_INTERFACE_NAMES: frozenset[str] = frozenset({"lo", "lo0"})
+# A container host has dozens of bridges and veth pairs; the refusal names a few
+# and counts the rest rather than printing a wall of them.
+_REPORTED_INTERFACE_LIMIT = 5
 TRANSPORTS = ("http", "websocket")
 # The websocket lane wraps the Responses body in a frame envelope; production
 # builds the same one in ``_build_websocket_response_create_payload``.
@@ -251,6 +265,53 @@ def assert_loopback_base_url(base_url: str) -> None:
     parts = urlsplit(base_url)
     if parts.scheme != "http" or not parts.hostname or not loopback_host(parts.hostname):
         raise CaptureRefusal(f"capture origin base URL must be loopback HTTP: {base_url}")
+
+
+def observed_network_interfaces() -> tuple[str, ...]:
+    """Every network interface visible in *this* namespace, sorted.
+
+    ``socket.if_nameindex()`` asks the kernel over netlink, so it answers for the
+    calling task's network namespace. ``/sys/class/net`` does not: sysfs stays
+    bound to the namespace it was mounted in, and inside ``unshare --net``
+    (which creates no mount namespace) it still lists the host's ``eth0`` --
+    measured on the development host, and the reason this is not a directory
+    listing.
+    """
+
+    return tuple(sorted(name for _index, name in socket.if_nameindex()))
+
+
+def _summarise_interfaces(names: Sequence[str]) -> str:
+    listed = ", ".join(names[:_REPORTED_INTERFACE_LIMIT])
+    remainder = len(names) - _REPORTED_INTERFACE_LIMIT
+    return f"{listed} and {remainder} more" if remainder > 0 else listed
+
+
+def network_isolation(*, requested: bool, interfaces: Sequence[str] | None = None) -> dict[str, Any]:
+    """Observe the namespace and refuse if the isolation the run claims is absent.
+
+    The manifest field this returns is evidence, not a restatement of the flags:
+    it is derived from the interfaces the kernel reports here and now. Before
+    that, ``network_namespace: true`` merely echoed "the operator did not pass
+    ``--no-network-namespace``", so an inherited ``CODEX_BODY_CAPTURE_NETNS=1``
+    skipped the ``unshare`` re-exec and the run still attested isolation --
+    reproduced, and the reason the marker is now an argv flag.
+
+    A namespace whose only interface is loopback cannot reach anything off the
+    host, which is the property the lane sells; how it came about does not
+    matter, so an operator already inside such a namespace passes too.
+    """
+
+    observed = observed_network_interfaces() if interfaces is None else tuple(sorted(interfaces))
+    routable = tuple(name for name in observed if name not in LOOPBACK_INTERFACE_NAMES)
+    if requested and routable:
+        raise CaptureRefusal(
+            "network isolation is not in effect: this namespace still carries "
+            f"{_summarise_interfaces(routable)}, so external egress is possible. "
+            "The capture never started. Re-run the documented command, or pass "
+            "--no-network-namespace --i-accept-network-egress to capture without isolation."
+        )
+    return {"requested": requested, "loopback_only": not routable, "interfaces": list(observed)}
 
 
 def assert_catalog_path(catalog: Path) -> Path:
@@ -484,13 +545,37 @@ def reexec_environment(environment: Mapping[str, str], *, repo_root: Path = REPO
     origin, or failing outright when the two differ. Pinning the repository that
     was actually launched makes the documented ``python -m`` invocation behave
     the same after the namespace re-exec as before it.
+
+    It carries no "already inside the namespace" marker: that travels as
+    ``REEXEC_FLAG`` on the command line, because an environment variable is
+    inherited from the operator's shell and a stale export silently turned the
+    isolation off.
     """
 
     child = dict(environment)
-    child[REEXEC_MARKER] = "1"
     existing = child.get("PYTHONPATH")
     child["PYTHONPATH"] = f"{repo_root}{os.pathsep}{existing}" if existing else str(repo_root)
     return child
+
+
+def reexec_command(argv: Sequence[str], *, executable: str = sys.executable) -> list[str]:
+    """The ``unshare`` command line that re-runs this script inside a fresh netns."""
+
+    inner = 'ip link set lo up && exec "$@"'
+    return [
+        "unshare",
+        "--map-root-user",
+        "--net",
+        "--",
+        "sh",
+        "-c",
+        inner,
+        "sh",
+        executable,
+        str(Path(__file__).resolve()),
+        *argv,
+        REEXEC_FLAG,
+    ]
 
 
 def _reexec_in_network_namespace(argv: Sequence[str]) -> int:
@@ -501,21 +586,7 @@ def _reexec_in_network_namespace(argv: Sequence[str]) -> int:
             "unshare and ip are required for the isolated capture lane; "
             "pass --no-network-namespace --i-accept-network-egress to opt out"
         )
-    inner = 'ip link set lo up && exec "$@"'
-    command = [
-        "unshare",
-        "--map-root-user",
-        "--net",
-        "--",
-        "sh",
-        "-c",
-        inner,
-        "sh",
-        sys.executable,
-        str(Path(__file__).resolve()),
-        *argv,
-    ]
-    return subprocess.run(command, env=reexec_environment(os.environ), check=False).returncode
+    return subprocess.run(reexec_command(argv), env=reexec_environment(os.environ), check=False).returncode
 
 
 def _serve(app: Any, port: int) -> tuple[Any, threading.Thread]:
@@ -596,6 +667,10 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Required companion of --no-network-namespace: egress is then only policy, not kernel",
     )
+    # Internal: set by ``reexec_command`` on the child so it does not re-exec
+    # again. Not an environment variable, and not load-bearing for the
+    # attestation -- ``network_isolation`` observes the namespace either way.
+    parser.add_argument(REEXEC_FLAG, action="store_true", help=argparse.SUPPRESS)
     return parser
 
 
@@ -613,28 +688,38 @@ def preflight(args: argparse.Namespace, environment: Mapping[str, str] | None = 
         raise CaptureRefusal("codex binary not found; pass --codex-bin")
     assert_clean_environment(environment)
     assert_ambient_home_uncredentialed(environment)
-    destination = assert_output_outside_repo(args.out)
+    # The storage policy is read from the module attribute rather than from the
+    # default argument, so a test that has to reach the steps *after* this one
+    # can pin it; the refusal itself is covered by its own tests.
+    destination = assert_output_outside_repo(args.out, forbidden_roots=FORBIDDEN_OUTPUT_ROOTS)
     catalog = assert_catalog_path(args.catalog)
     base_url = f"http://127.0.0.1:{args.port}/v1"
     assert_loopback_base_url(base_url)
     return destination, catalog, base_url
 
 
-def main(argv: Sequence[str] | None = None) -> int:
+def main(argv: Sequence[str] | None = None, environment: Mapping[str, str] | None = None) -> int:
     raw_argv = list(sys.argv[1:] if argv is None else argv)
     args = build_parser().parse_args(raw_argv)
+    environment = os.environ if environment is None else environment
     try:
-        destination, catalog, base_url = preflight(args)
+        destination, catalog, base_url = preflight(args, environment)
     except CaptureRefusal as exc:
         print(f"Refusing to capture: {exc}", file=sys.stderr)
         return 2
 
-    if not args.no_network_namespace and os.environ.get(REEXEC_MARKER) != "1":
+    if not args.no_network_namespace and not args.already_in_network_namespace:
         try:
             return _reexec_in_network_namespace(raw_argv)
         except CaptureRefusal as exc:
             print(f"Refusing to capture: {exc}", file=sys.stderr)
             return 2
+
+    try:
+        isolation = network_isolation(requested=not args.no_network_namespace)
+    except CaptureRefusal as exc:
+        print(f"Refusing to capture: {exc}", file=sys.stderr)
+        return 2
 
     started_at = datetime.now(UTC)
     destination.mkdir(parents=True, exist_ok=True)
@@ -648,8 +733,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         app, captured = _build_origin(catalog, destination, started_at)
         server, thread = _serve(app, args.port)
         print(
-            "network namespace: "
-            + ("loopback only (unshare --net)" if not args.no_network_namespace else "DISABLED by operator")
+            "network isolation: "
+            + ("loopback only" if isolation["loopback_only"] else "DISABLED by operator")
+            + f" (observed interfaces: {_summarise_interfaces(isolation['interfaces'])})"
         )
         print(f"capture origin: {base_url} (health ok)")
         catalog_attestation = file_attestation("catalog", catalog)
@@ -671,13 +757,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                 home / "config.toml",
                 capture_config_toml(model_slug=model_slug, base_url=base_url, transport=args.transport),
             )
-            environment = capture_environment(os.environ, home=home)
+            child_environment = capture_environment(environment, home=home)
             try:
                 completed = _run_codex(
                     codex_binary=args.codex_bin,
                     model_slug=model_slug,
                     workdir=workdir,
-                    environment=environment,
+                    environment=child_environment,
                     prompt=args.prompt,
                     timeout_seconds=args.timeout_seconds,
                 )
@@ -739,7 +825,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             "codex_version": codex_version,
             "transport_requested": args.transport,
             "transports_observed": sorted({str(run["transport"]) for run in runs if run.get("body")}),
-            "network_namespace": not args.no_network_namespace,
+            # Observed, not requested: the interface list the kernel reported
+            # inside the namespace this run captured in.
+            "network_isolation": isolation,
             "catalog": catalog_attestation,
             "runs": runs,
         }
