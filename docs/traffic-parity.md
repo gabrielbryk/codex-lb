@@ -311,15 +311,23 @@ delete them rather than a gate.
 The sanitiser fails closed on an unreviewed top-level field, drops the Codex
 telemetry fields production also strips, removes the websocket frame envelope
 from a websocket capture, replaces identifiers with fixed
-placeholders, and rewrites the operator strings inside message content: the
-`<environment_context>` paths, date, timezone and shell, the
-`# AGENTS.md instructions for <path>` heading, and the `<skills_instructions>`
-skill-root path and skill inventory — the last being the largest real leak and
-the one no credential scanner recognises. It never fabricates a key, because a
-real Responses-Lite body has no `instructions`, `tools` or `stream_options` and
-the portability view declines unknown top-level fields. `fixture_privacy_scan`
-adds an identifier pass on top of `privacy_scan`'s credential shapes, which
-passes a tree full of live UUIDs and workspace paths on its own.
+placeholders, and rewrites the operator strings in every text-bearing field of
+an input item — a message's `content`, but equally a `function_call`'s
+`arguments` and a `function_call_output`'s `output`, in the string and the
+list-of-parts form: the `<environment_context>` paths, date, timezone and shell,
+the `# AGENTS.md instructions for <path>` heading, and the
+`<skills_instructions>` skill-root path and skill inventory — the last being the
+largest real leak and the one no credential scanner recognises. It never
+fabricates a key, because a real Responses-Lite body has no `instructions`,
+`tools` or `stream_options` and the portability view declines unknown top-level
+fields. The Codex-generated tool surface is byte preserved: the top-level
+`tools` array and a Lite `additional_tools` item's own `tools`.
+
+`fixture_privacy_scan` adds an identifier pass on top of `privacy_scan`'s
+credential shapes, which passes a tree full of live UUIDs and workspace paths on
+its own — plus a backstop for operator text the field walk may not have reached:
+an `<environment_context>` tag or a `<skills_instructions>` inventory whose
+value is not the sanitiser's placeholder, anywhere in the file at any depth.
 
 Never commit a `headers-*.json`: it holds the `authorization` line even when
 the token was disposable. Delete the raw capture directory in the same session.

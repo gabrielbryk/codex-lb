@@ -16,7 +16,11 @@ Three rules, in tension, decided in this order:
    view declines unknown top-level fields, so fabricating a key would change
    the recorded verdict. Nothing here ever adds a key.
 3. **Redact operator data, keep evidence.** Telemetry fields go whole; paths,
-   dates, the skill inventory and identifiers become fixed placeholders.
+   dates, the skill inventory and identifiers become fixed placeholders. Every
+   text-bearing field of an input item is rewritten, not only a message's
+   ``content``: a ``function_call``'s ``arguments`` and a
+   ``function_call_output``'s ``output`` carry the operator's commands and their
+   output.
    Input-item ``id`` values are *replaced*, not removed, by default: a
    non-empty prefixed id is what makes a native Codex body decline as
    ``not_portable_history``, and deleting it would hide that fact from the
@@ -180,7 +184,7 @@ class Redaction:
 
 _SKILL_ROOT_ENTRY = re.compile(r"(?m)^(-\s+`[^`]+`\s*=\s*`)([^`]*)(`)$")
 _SKILL_INVENTORY = re.compile(r"(?s)(### Available skills\n)(.*?)(?=\n#{1,3} |\n</skills_instructions>|\Z)")
-_ENVIRONMENT_TAGS: tuple[tuple[str, str], ...] = (
+ENVIRONMENT_TAGS: tuple[tuple[str, str], ...] = (
     ("cwd", "workspace"),
     ("root", "workspace"),
     ("current_date", "date"),
@@ -195,6 +199,14 @@ _AGENTS_HEADING = re.compile(r"(?m)^(#\s+AGENTS\.md instructions for\s+)(\S.*)$"
 _HOST_PATH = re.compile(r"(?:/tmp|/mnt|/home/[^/\s\"'`<>,;)\]]+|/Users/[^/\s\"'`<>,;)\]]+)(?:/[^\s\"'`<>,;)\]]*)*")
 # Content-part fields that carry operator text (``input_text``, ``output_text``).
 _TEXT_PART_FIELDS: tuple[str, ...] = ("text",)
+
+# Input-item fields that carry operator text, each as a string or as a list of
+# parts. ``content`` is the message form; ``arguments`` is the call a
+# ``function_call`` made, ``output`` is what a ``function_call_output`` printed,
+# ``input`` is the ``custom_tool_call`` form of ``arguments`` and ``summary`` is
+# the reasoning summary. Deliberately not here: ``tools`` (the Lite
+# ``additional_tools`` bundle), which is Codex-generated and byte preserved.
+TEXT_BEARING_ITEM_FIELDS: tuple[str, ...] = ("content", "arguments", "input", "output", "summary")
 
 
 _MINIMUM_IDENTITY_LENGTH = 4
@@ -325,7 +337,7 @@ def rewrite_operator_text(text: str, placeholders: Placeholders = PLACEHOLDERS) 
 
     if "<skills_instructions>" in text or "### Skill roots" in text:
         text = _rewrite_skills_instructions(text, placeholders)
-    for tag, attribute in _ENVIRONMENT_TAGS:
+    for tag, attribute in ENVIRONMENT_TAGS:
         # Every replacement goes through a callable: a template string would
         # interpret backslashes and group references in the placeholder, and
         # escaping it for a *pattern* instead writes the escapes into the
@@ -350,37 +362,49 @@ def _rewritten(value: str, path: str, placeholders: Placeholders, redactions: li
     return rewritten
 
 
-def _rewrite_item_content(
+def _rewrite_item_text(
     item: dict[str, Any],
     path: str,
     placeholders: Placeholders,
     redactions: list[Redaction],
 ) -> None:
-    """Rewrite the operator text in one input item's message content, in place.
+    """Rewrite the operator text in one input item's text-bearing fields, in place.
 
-    Scoped to message content on purpose. A Lite ``additional_tools`` bundle and
-    its ``namespace`` tool descriptions are Codex-generated -- the load-bearing
-    evidence for the ``not_portable_lite_namespace`` verdict -- and are byte
-    preserved, like the top-level ``tools`` array. Codex's own ``spawn_agent``
-    description embeds ``/root/<task>`` agent namespaces, so walking every
-    nested string would corrupt real content while protecting nobody.
+    Every field in ``TEXT_BEARING_ITEM_FIELDS``, not only ``content``. A
+    transcript item is not always a message: a ``function_call`` carries the
+    command the agent ran in ``arguments`` and a ``function_call_output`` carries
+    what it printed in ``output`` (a string, or a list of parts). Both are as
+    operator-specific as anything in a message, and walking only ``content`` let
+    a cwd, a skill inventory and a skill-root path through the sanitiser *and*
+    through ``fixture_privacy_scan --strict``, which had no vocabulary for them.
+
+    Still not a walk of every nested string. The Lite ``additional_tools``
+    bundle lives in the item's ``tools`` array and the tool declarations live in
+    the top-level ``tools``; both are Codex-generated, both are the load-bearing
+    evidence for the ``not_portable_lite_namespace`` verdict, and both stay byte
+    identical. Codex's own ``spawn_agent`` description embeds ``/root/<task>``
+    agent namespaces, which a catch-all rewriter would corrupt while protecting
+    nobody -- the same reason ``/root`` is absent from ``_HOST_PATH``.
     """
 
-    content = item.get("content")
-    if isinstance(content, str):
-        item["content"] = _rewritten(content, f"{path}.content", placeholders, redactions)
-        return
-    if not isinstance(content, list):
-        return
-    for index, part in enumerate(content):
-        if isinstance(part, str):
-            content[index] = _rewritten(part, f"{path}.content[{index}]", placeholders, redactions)
+    for field in TEXT_BEARING_ITEM_FIELDS:
+        value = item.get(field)
+        if isinstance(value, str):
+            item[field] = _rewritten(value, f"{path}.{field}", placeholders, redactions)
             continue
-        if not isinstance(part, dict):
+        if not isinstance(value, list):
             continue
-        for field in _TEXT_PART_FIELDS:
-            if isinstance(part.get(field), str):
-                part[field] = _rewritten(part[field], f"{path}.content[{index}].{field}", placeholders, redactions)
+        for index, part in enumerate(value):
+            if isinstance(part, str):
+                value[index] = _rewritten(part, f"{path}.{field}[{index}]", placeholders, redactions)
+                continue
+            if not isinstance(part, dict):
+                continue
+            for part_field in _TEXT_PART_FIELDS:
+                if isinstance(part.get(part_field), str):
+                    part[part_field] = _rewritten(
+                        part[part_field], f"{path}.{field}[{index}].{part_field}", placeholders, redactions
+                    )
 
 
 def _sanitise_item_identifiers(
@@ -470,7 +494,7 @@ def sanitize_body(
                 redactions,
                 strip_item_ids=strip_item_ids,
             )
-            _rewrite_item_content(item, path, placeholders, redactions)
+            _rewrite_item_text(item, path, placeholders, redactions)
     elif isinstance(input_items, str):
         sanitised["input"] = _rewritten(input_items, "input", placeholders, redactions)
     return sanitised, redactions

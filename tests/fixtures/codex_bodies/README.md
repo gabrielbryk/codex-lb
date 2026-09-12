@@ -193,7 +193,11 @@ request body to the proxy host instead.
    paths, dates and identifiers changed.
 5. Read `instructions` and the developer prefix for `<skills_instructions>`
    skill-root paths and for the operator's installed skill names — the biggest
-   real leak, and the one no credential scanner has vocabulary for.
+   real leak, and the one no credential scanner has vocabulary for. A transcript
+   that contains tool calls carries the same text in `function_call.arguments`
+   and `function_call_output.output`; the sanitiser rewrites those too, and the
+   gate flags any environment tag or skill inventory left holding a
+   non-placeholder value.
 6. Add the `provenance.json` entry and the table row above: origin, slug,
    transport, UTC date, `codex --version`, catalog sha256, sanitisation list,
    expected view and expected verdict.

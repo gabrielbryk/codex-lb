@@ -10,8 +10,8 @@
 
 ## 2. Sanitiser and privacy gate
 
-- [x] 2.1 Add `scripts/traffic_analysis/codex_body_sanitize.py`: positive top-level allowlist that fails closed, telemetry drops, identifier placeholders, message-content text rewrites, absence preservation, idempotence, headers sidecar.
-- [x] 2.2 Scope the text rewrite to message content so the Lite `additional_tools` bundle stays byte-identical (Codex's `spawn_agent` description documents `/root/<task>` agent namespaces that a catch-all path rewriter destroys).
+- [x] 2.1 Add `scripts/traffic_analysis/codex_body_sanitize.py`: positive top-level allowlist that fails closed, telemetry drops, identifier placeholders, input-item text rewrites, absence preservation, idempotence, headers sidecar.
+- [x] 2.2 Scope the text rewrite to an item's text-bearing fields — `content`, and equally a tool call's `arguments` and a tool result's `output` in both forms — so the Lite `additional_tools` bundle in the item's `tools` array stays byte-identical (Codex's `spawn_agent` description documents `/root/<task>` agent namespaces that a catch-all path rewriter destroys), and back it with a value-conditioned gate pattern for an environment tag or skill inventory left unreplaced at any depth.
 - [x] 2.3 Add `scripts/traffic_analysis/fixture_privacy_scan.py`: reuse `privacy_scan.scan_tree` for credential shapes; add the identifier pass with value-conditioned patterns so Codex's legitimate numeric `session_id` tool parameter never matches; read the bare-telemetry-key exemptions from `provenance.json` so the documented strict command passes on a pristine checkout with no flags.
 - [x] 2.5 Keep the identity pass machine-independent: pin it in the committed gate, and skip host/account names that name no operator (container and CI defaults, Codex payload vocabulary) so the gate cannot report an unclearable finding and the sanitiser cannot rewrite `/root` out of real content.
 - [x] 2.4 Cover removal (against output bytes), preservation (byte equality and absence), idempotence and fail-closed in `tests/unit/test_codex_body_sanitizer.py`.

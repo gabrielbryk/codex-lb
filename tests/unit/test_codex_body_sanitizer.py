@@ -349,6 +349,88 @@ def test_a_lite_additional_tools_bundle_is_byte_preserved() -> None:
     assert json.dumps(preserved, sort_keys=True) == json.dumps(expected, sort_keys=True)
 
 
+_TOOL_CALL_LEAK = (
+    "<skills_instructions>\n### Skill roots\n- `r0` = `/srv/acme/private-skills`\n"
+    "### Available skills\n- acme-payroll-export: Export the ACME payroll ledger for a pay period.\n"
+    "</skills_instructions>\n"
+    "<environment_context><cwd>/srv/acme/ledger</cwd>"
+    "<timezone>Asia/Seoul</timezone><shell>zsh</shell></environment_context>"
+)
+
+
+def _tool_call_transcript() -> dict[str, Any]:
+    """A turn whose transcript is tool calls, which is what a second turn looks like."""
+
+    return {
+        "model": "gpt-5.5",
+        "input": [
+            {
+                "type": "function_call",
+                "call_id": "call_1",
+                "name": "shell",
+                "arguments": json.dumps({"command": ["bash", "-lc", "cd /home/jane/clients/acme && ./deploy.sh"]}),
+            },
+            {"type": "function_call_output", "call_id": "call_1", "output": _TOOL_CALL_LEAK},
+            {
+                "type": "function_call_output",
+                "call_id": "call_2",
+                "output": [{"type": "output_text", "text": _TOOL_CALL_LEAK}],
+            },
+        ],
+    }
+
+
+def test_a_tool_call_transcript_is_rewritten_like_message_content() -> None:
+    """The walk covers every text-bearing item field, not only ``content``.
+
+    A ``function_call`` carries the command the agent ran and a
+    ``function_call_output`` carries what it printed -- in both the string and
+    the list-of-parts form. Walking only ``content`` left the operator's cwd,
+    skill inventory and skill-root path in the fixture, with no redaction
+    recorded to tell the reviewer to look.
+    """
+
+    sanitised, redactions = sanitize_body(_tool_call_transcript())
+
+    assert [redaction.path for redaction in redactions] == [
+        "input[0].arguments",
+        "input[1].output",
+        "input[2].output[0].text",
+    ]
+    serialized = json.dumps(sanitised)
+    for leaked in ("/home/jane", "/srv/acme", "acme-payroll-export", "Asia/Seoul", "zsh"):
+        assert leaked not in serialized
+    assert PLACEHOLDERS.workspace in sanitised["input"][0]["arguments"]
+    assert PLACEHOLDERS.skill_root in sanitised["input"][1]["output"]
+    assert PLACEHOLDERS.timezone in sanitised["input"][2]["output"][0]["text"]
+
+
+def test_a_tool_call_leak_no_longer_passes_the_privacy_gate_as_well(tmp_path: Path) -> None:
+    """The second half of the same hole: the gate had no vocabulary for it either.
+
+    None of the leaked strings is a path the gate knows, an identifier, an email
+    or a credential shape, so an unsanitised tool-call output passed
+    ``--strict`` too. The backstop is value-conditioned -- the sanitised body
+    keeps the same tags and headings -- so it flags the value, not the marker.
+    """
+
+    (tmp_path / "unsanitised.json").write_text(json.dumps(_tool_call_transcript()), encoding="utf-8")
+
+    report = fixture_privacy_scan.scan_fixture_tree(tmp_path)
+
+    assert report["passed"] is False
+    assert dict((finding["path"], finding["kinds"]) for finding in report["findings"])["unsanitised.json"] == [
+        "home_path",
+        "unsanitised_environment_tag",
+        "unsanitised_skill_inventory",
+    ]
+
+    sanitised, _ = sanitize_body(_tool_call_transcript())
+    (tmp_path / "unsanitised.json").write_text(json.dumps(sanitised), encoding="utf-8")
+
+    assert fixture_privacy_scan.scan_fixture_tree(tmp_path)["passed"] is True
+
+
 def test_the_rewriter_is_a_no_op_on_text_without_operator_markers() -> None:
     innocuous = "Please refactor the parser and keep the public signature stable."
 
@@ -495,6 +577,23 @@ def test_mutation_an_operator_home_path_fails_the_privacy_gate(tmp_path: Path) -
     assert report["passed"] is False
     kinds = dict((finding["path"], finding["kinds"]) for finding in report["findings"])[CAPTURED_STANDARD]
     assert "home_path" in kinds
+    # The unmutated corpus passes the same scan, so the finding is the mutation's.
+    assert _scan(_corpus(tmp_path / "pristine")[0])["passed"] is True
+
+
+def test_mutation_a_skill_inventory_inside_a_tool_call_fails_the_privacy_gate(tmp_path: Path) -> None:
+    """Planted on the real corpus, in the item shape the field walk used to miss."""
+
+    root, _provenance = _corpus(tmp_path)
+    body = json.loads((root / CAPTURED_STANDARD).read_text(encoding="utf-8"))
+    body["input"].append({"type": "function_call_output", "call_id": "call_1", "output": _TOOL_CALL_LEAK})
+    (root / CAPTURED_STANDARD).write_text(json.dumps(body), encoding="utf-8")
+
+    report = _scan(root)
+
+    assert report["passed"] is False
+    kinds = dict((finding["path"], finding["kinds"]) for finding in report["findings"])[CAPTURED_STANDARD]
+    assert kinds == ["unsanitised_environment_tag", "unsanitised_skill_inventory"]
     # The unmutated corpus passes the same scan, so the finding is the mutation's.
     assert _scan(_corpus(tmp_path / "pristine")[0])["passed"] is True
 

@@ -9,6 +9,13 @@ Two passes over the same tree:
   The credential scanner has no vocabulary for a workspace path, a live UUID or
   a telemetry key, and it *passes* the fixture tree today despite both fixtures
   carrying UUIDs and absolute paths.
+* **Unsanitised operator text** -- the backstop for the sanitiser's field walk.
+  The walk visits the fields of an input item it knows about, so an operator
+  marker in a shape it has not met yet reaches the fixture; an environment tag
+  or a skill inventory whose value is not the sanitiser's placeholder is caught
+  here instead, anywhere in the file at any depth. Measured, not hypothetical: a
+  ``<timezone>`` and a private skill inventory inside a
+  ``function_call_output.output`` passed the sanitiser and ``--strict`` both.
 
 The identifier pass deliberately skips ``*.md``: the corpus README has to be
 able to name the keys the sanitiser removes, and prose is reviewed by a human,
@@ -35,12 +42,22 @@ from typing import Any
 
 try:
     from scripts.traffic_analysis.artifacts import atomic_write_json
-    from scripts.traffic_analysis.codex_body_sanitize import is_placeholder_uuid, live_identity_strings
+    from scripts.traffic_analysis.codex_body_sanitize import (
+        ENVIRONMENT_TAGS,
+        PLACEHOLDERS,
+        is_placeholder_uuid,
+        live_identity_strings,
+    )
     from scripts.traffic_analysis.privacy_scan import scan_tree
 except ModuleNotFoundError:  # Allow direct script execution.
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
     from scripts.traffic_analysis.artifacts import atomic_write_json
-    from scripts.traffic_analysis.codex_body_sanitize import is_placeholder_uuid, live_identity_strings
+    from scripts.traffic_analysis.codex_body_sanitize import (
+        ENVIRONMENT_TAGS,
+        PLACEHOLDERS,
+        is_placeholder_uuid,
+        live_identity_strings,
+    )
     from scripts.traffic_analysis.privacy_scan import scan_tree
 
 _CHUNK_BYTES = 1024 * 1024
@@ -75,6 +92,37 @@ TELEMETRY_KEY_KIND = "telemetry_field"
 
 PROVENANCE_NAME = "provenance.json"
 
+
+def _unsanitised_environment_tag_pattern() -> re.Pattern[bytes]:
+    """``<cwd>``/``<timezone>``/… carrying anything but the sanitiser's placeholder.
+
+    A shape, like every other kind here: the sanitised corpus keeps the tags (the
+    fixture must stay a real Codex body) and the finding is the *value*. Built
+    from the sanitiser's own table so the two cannot drift.
+    """
+
+    alternatives = []
+    for tag, attribute in ENVIRONMENT_TAGS:
+        opening = re.escape(f"<{tag}>".encode())
+        placeholder = re.escape(f"{getattr(PLACEHOLDERS, attribute)}</{tag}>".encode())
+        alternatives.append(opening + rb"(?!" + placeholder + rb")")
+    return re.compile(rb"|".join(alternatives))
+
+
+def _unsanitised_skill_inventory_pattern() -> re.Pattern[bytes]:
+    """The operator's installed skill names and skill-root paths, unreplaced.
+
+    The largest real leak in a captured body and the one no credential scanner
+    has vocabulary for. Both forms are matched against the JSON escaping the
+    bodies are stored in (``\\n``) as well as a literal newline.
+    """
+
+    newline = rb"(?:\\n|\n)"
+    inventory = rb"### Available skills" + newline + rb"(?!- " + re.escape(PLACEHOLDERS.skill_name.encode()) + rb")"
+    root_entry = newline + rb"- `[^`]{1,80}` *= *`(?!" + re.escape(PLACEHOLDERS.skill_root.encode()) + rb"`)"
+    return re.compile(inventory + rb"|" + root_entry)
+
+
 _PATTERNS: tuple[tuple[str, re.Pattern[bytes]], ...] = (
     # ``/root`` is not flagged: it identifies no operator, and Codex's own
     # ``spawn_agent`` description documents agent task namespaces as
@@ -93,6 +141,15 @@ _PATTERNS: tuple[tuple[str, re.Pattern[bytes]], ...] = (
         re.compile(rb"(?:client_metadata|access_programs|chatgpt-account-id|x-codex-[a-z-]+)"),
     ),
     ("email", re.compile(rb"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")),
+    # The backstop for operator text the sanitiser walked past. Both kinds are
+    # matched over the whole file, at any nesting depth, so a marker inside a
+    # tool call's arguments or output is caught even when no field-walking rule
+    # covers that item shape yet. Neither is a path or an identifier, which is
+    # why nothing above saw them: a `<timezone>Asia/Seoul</timezone>` and a
+    # private skill inventory inside a `function_call_output.output` passed the
+    # sanitiser and `--strict` together.
+    ("unsanitised_environment_tag", _unsanitised_environment_tag_pattern()),
+    ("unsanitised_skill_inventory", _unsanitised_skill_inventory_pattern()),
 )
 
 
