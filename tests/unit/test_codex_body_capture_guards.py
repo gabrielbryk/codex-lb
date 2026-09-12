@@ -142,6 +142,35 @@ def test_an_outbound_proxy_variable_in_the_environment_is_refused(variable: str,
         assert_clean_environment({name: "http://127.0.0.1:1"})
 
 
+def test_preflight_refuses_a_proxied_shell_before_creating_anything(tmp_path: Path) -> None:
+    """The refusal has to fire from the command, not only from a unit call.
+
+    Before it existed, a proxied shell reached the capture: the guard accepted
+    it and ``capture_environment`` handed ``HTTP_PROXY``, ``https_proxy``,
+    ``ALL_PROXY``, ``WS_PROXY`` and ``NO_PROXY`` straight to ``codex exec``,
+    which routes even a ``http://127.0.0.1:<port>/v1`` POST through them.
+    """
+
+    catalog = tmp_path / "models_cache.json"
+    catalog.write_text('{"models": []}', encoding="utf-8")
+    destination = tmp_path / "captures"
+    args = build_parser().parse_args(
+        ["--model", "gpt-5.5", "--out", str(destination), "--catalog", str(catalog), "--codex-bin", "/usr/bin/true"]
+    )
+    proxied = {
+        "PATH": "/usr/bin",
+        "HTTP_PROXY": "http://proxy.invalid:8080",
+        "https_proxy": "http://proxy.invalid:8080",
+        "ALL_PROXY": "socks5://proxy.invalid:1080",
+        "NO_PROXY": "localhost",
+    }
+
+    with pytest.raises(CaptureRefusal, match="ALL_PROXY, HTTP_PROXY, NO_PROXY, https_proxy"):
+        preflight(args, proxied)
+
+    assert not destination.exists()
+
+
 def test_the_refused_proxy_family_covers_the_names_production_reads() -> None:
     """Drift guard against ``app.core.utils.proxy_env``, the other end of the same surface."""
 
