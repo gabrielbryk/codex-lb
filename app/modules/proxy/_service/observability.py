@@ -12,6 +12,7 @@ from app.core.metrics.prometheus import (
     PROMETHEUS_AVAILABLE,
     continuity_fail_closed_total,
     continuity_owner_resolution_total,
+    continuity_self_heal_total,
     http_bridge_routing_total,
     upstream_reasoning_replay_400_total,
     upstream_transport_decisions_total,
@@ -323,6 +324,36 @@ def _record_continuity_fail_closed(
         _hash_identifier_or_none(session_id),
         upstream_error_code,
         diagnostics,
+    )
+
+
+def _record_continuity_self_heal(
+    *,
+    surface: str,
+    reason: str,
+    previous_response_id: str | None,
+    session_id: str | None = None,
+) -> None:
+    """Record a denied continuity anchor that was healed in-place.
+
+    Sibling to ``_record_continuity_fail_closed``: fires when a denied
+    proxy-injected anchor is dropped and the request is reissued with full
+    context in the same submission instead of raising, breaking the
+    retry-forever loop a native client cannot otherwise escape.
+    """
+    prometheus_available = bool(_service_global("PROMETHEUS_AVAILABLE", PROMETHEUS_AVAILABLE))
+    counter = _service_global("continuity_self_heal_total", continuity_self_heal_total)
+    if prometheus_available and counter is not None:
+        counter.labels(
+            surface=surface,
+            reason=reason,
+        ).inc()
+    logger.warning(
+        "continuity_self_heal surface=%s reason=%s previous_response_id=%s session_id=%s",
+        surface,
+        reason,
+        _hash_identifier_or_none(previous_response_id),
+        _hash_identifier_or_none(session_id),
     )
 
 

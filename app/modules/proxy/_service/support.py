@@ -1069,6 +1069,13 @@ class _WebSocketRequestState:
     # explicit turn-state header guarantees continuity for stale recovery.
     hard_continuity_anchor: bool = False
     proxy_injected_previous_response_id: bool = False
+    # Set once this submission has already self-healed a denied
+    # proxy-injected anchor by dropping it and reissuing with full context
+    # (see the dispatch-site check in ``request_submit.py``). Bounds the
+    # self-heal to at most one attempt per client request: a second denial
+    # in the same submission falls through to the existing fail-closed raise
+    # instead of looping.
+    continuity_self_healed: bool = False
     # The durable lookup carried an anchor, but its owner was already stale,
     # ownerless, or lease-expired when this request arrived.  Such a request
     # must not be presented to the client as a retryable upstream timeout.

@@ -103,6 +103,7 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _http_bridge_retry_circuit_attempt_selection_for_pending_requests,
     _log_http_bridge_event,
     _record_continuity_fail_closed,
+    _record_continuity_self_heal,
     _record_http_bridge_prewarm_outcome,
     _register_http_bridge_turn_state_aliases_locked,
     _release_http_bridge_unanchored_handoff,
@@ -2055,28 +2056,78 @@ class _HTTPBridgeRequestSubmitMixin:
                             or _http_bridge_denied_anchor_fence_advanced(self, request_state)
                         )
                     ):
-                        _record_continuity_fail_closed(
-                            surface="http_bridge",
-                            reason="denied_proxy_anchor_before_dispatch",
-                            previous_response_id=request_state.previous_response_id,
-                            session_id=request_state.session_id,
-                            upstream_error_code="previous_response_not_found",
+                        denied_previous_response_id = request_state.previous_response_id
+                        # The anchor is our own optimization, not something
+                        # the client asked for: it substituted
+                        # previous_response_id for the client's own full
+                        # input and trimmed the input down to only the new
+                        # items (see the ``session_anchor_candidate`` /
+                        # ``fresh_reattach_can_use_durable_anchor`` injection
+                        # sites in streaming.py). A native Codex client never
+                        # set this anchor and cannot drop it on its own, so a
+                        # bare fail-closed here makes it retry into the same
+                        # denial forever (issue: 15+ minute reconnect loops
+                        # after an LB restart). Self-heal in place when the
+                        # pre-injection payload is still available and is
+                        # known to have carried full context on its own
+                        # (``proxy_injected_anchor_had_full_resend_payload``):
+                        # drop the anchor and reissue this same submission
+                        # with that full-context text instead of raising.
+                        # Bounded to one heal per client request so a second
+                        # denial in the same submission still fails closed.
+                        can_self_heal_denied_anchor = (
+                            not request_state.continuity_self_healed
+                            and request_state.proxy_injected_anchor_had_full_resend_payload
+                            and request_state.fresh_upstream_request_text is not None
                         )
-                        raise ProxyResponseError(
-                            502,
-                            openai_error(
-                                "stream_incomplete",
-                                "The previous response anchor was rejected upstream; retry the request.",
-                            ),
-                            # Fail-closed rewrite: preserve the upstream cause
-                            # just recorded above instead of dropping it. The
-                            # native give-up path (api.py
-                            # ``_stream_response_error_events``) reads
-                            # ``upstream_error_code``/``retry_after_seconds``
-                            # off this exception to name the real cause in the
-                            # retryable error it surfaces to Codex clients.
-                            upstream_error_code="previous_response_not_found",
-                        )
+                        if can_self_heal_denied_anchor:
+                            _record_continuity_self_heal(
+                                surface="http_bridge",
+                                reason="denied_proxy_anchor_before_dispatch",
+                                previous_response_id=denied_previous_response_id,
+                                session_id=request_state.session_id,
+                            )
+                            text_data = request_state.fresh_upstream_request_text
+                            request_state.request_text = text_data
+                            request_state.previous_response_id = None
+                            request_state.proxy_injected_previous_response_id = False
+                            request_state.denied_proxy_injected_anchor_fence_response_id = None
+                            request_state.denied_proxy_injected_anchor_fence_request_id = None
+                            request_state.denied_proxy_injected_anchor_fence_was_already_denied = False
+                            request_state.continuity_self_healed = True
+                        else:
+                            if not request_state.proxy_injected_anchor_had_full_resend_payload:
+                                # No full-context replay is available for this
+                                # submission (a reattach/replay stage that only
+                                # carries the anchor), so this request must
+                                # still fail closed. Drop the denial from the
+                                # session's injection state anyway so the
+                                # client's own retry is not re-anchored to the
+                                # same dead response id and can succeed once it
+                                # resends full history.
+                                session.denied_proxy_injected_anchor_ids.discard(denied_previous_response_id)
+                            _record_continuity_fail_closed(
+                                surface="http_bridge",
+                                reason="denied_proxy_anchor_before_dispatch",
+                                previous_response_id=denied_previous_response_id,
+                                session_id=request_state.session_id,
+                                upstream_error_code="previous_response_not_found",
+                            )
+                            raise ProxyResponseError(
+                                502,
+                                openai_error(
+                                    "stream_incomplete",
+                                    "The previous response anchor was rejected upstream; retry the request.",
+                                ),
+                                # Fail-closed rewrite: preserve the upstream cause
+                                # just recorded above instead of dropping it. The
+                                # native give-up path (api.py
+                                # ``_stream_response_error_events``) reads
+                                # ``upstream_error_code``/``retry_after_seconds``
+                                # off this exception to name the real cause in the
+                                # retryable error it surfaces to Codex clients.
+                                upstream_error_code="previous_response_not_found",
+                            )
                     if (
                         request_state.verified_stale_anchor_replay
                         and request_state.verified_stale_anchor_retry_circuit_generation_captured

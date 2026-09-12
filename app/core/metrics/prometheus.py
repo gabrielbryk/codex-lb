@@ -230,6 +230,13 @@ if PROMETHEUS_AVAILABLE:
         ["surface", "reason"],
         registry=REGISTRY,
     )
+    continuity_self_heal_total = Counter(
+        "codex_lb_continuity_self_heal_total",
+        "Total denied continuity anchors self-healed by reissuing with full context "
+        "instead of failing closed, by surface and reason",
+        ["surface", "reason"],
+        registry=REGISTRY,
+    )
     account_lease_acquired_total = Counter(
         "codex_lb_account_lease_acquired_total",
         "Total account pressure leases acquired by kind",
@@ -509,6 +516,7 @@ else:
     bridge_public_contract_error_total: CounterLike | None = None
     continuity_owner_resolution_total: CounterLike | None = None
     continuity_fail_closed_total: CounterLike | None = None
+    continuity_self_heal_total: CounterLike | None = None
     account_lease_acquired_total: CounterLike | None = None
     account_lease_released_total: CounterLike | None = None
     account_lease_stale_reclaimed_total: CounterLike | None = None
@@ -584,6 +592,7 @@ __all__ = [
     "cap_partition_replicas",
     "circuit_breaker_state",
     "continuity_fail_closed_total",
+    "continuity_self_heal_total",
     "event_loop_lag_seconds",
     "event_loop_lag_warnings_total",
     "continuity_owner_resolution_total",

@@ -488,6 +488,210 @@ async def test_submit_rejects_a_denied_proxy_anchor_before_upstream_dispatch(
 
 
 @pytest.mark.asyncio
+async def test_submit_self_heals_a_denied_proxy_anchor_with_full_context_available(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A denied anchor is dropped and reissued with full context, not fail-closed.
+
+    Native Codex clients always resend full input and never set
+    ``previous_response_id`` themselves, so they cannot drop an anchor the
+    proxy injected on their behalf. Failing closed here previously made
+    every retry hit the same denial forever. When the pre-injection payload
+    is known to have carried full context on its own
+    (``proxy_injected_anchor_had_full_resend_payload``), the dispatch-site
+    check must self-heal in place instead of raising.
+    """
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="denied-anchor-self-heal")
+    session.denied_proxy_injected_anchor_ids.add("resp-denied")
+    fresh_text = json.dumps({"type": "response.create", "input": ["full", "context"]})
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-denied-anchor-self-heal",
+        model="gpt-5.6",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        previous_response_id="resp-denied",
+        proxy_injected_previous_response_id=True,
+        proxy_injected_anchor_had_full_resend_payload=True,
+        fresh_upstream_request_text=fresh_text,
+        request_text='{"type":"response.create","previous_response_id":"resp-denied","input":[]}',
+        transport="http",
+        skip_request_log=True,
+    )
+    send_text = AsyncMock()
+    session.upstream = cast(
+        UpstreamWebSocket,
+        SimpleNamespace(send_text=send_text, close=AsyncMock()),
+    )
+    service._http_bridge_sessions[session.key] = session
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
+    monkeypatch.setattr(service, "_http_bridge_precreated_retry_allowed", AsyncMock(return_value=True))
+    self_heal_mock = Mock()
+    monkeypatch.setattr(http_bridge_request_submit_module, "_record_continuity_self_heal", self_heal_mock)
+
+    await service._submit_http_bridge_request_with_handoff(
+        session,
+        request_state=request_state,
+        text_data=request_state.request_text or "{}",
+        queue_limit=8,
+        request_scope_id="scope-denied-anchor-self-heal",
+        owned_unanchored_handoff=False,
+    )
+
+    send_text.assert_awaited_once()
+    assert send_text.await_args is not None
+    sent_payload = json.loads(send_text.await_args.args[0])
+    assert "previous_response_id" not in sent_payload
+    assert sent_payload["input"] == ["full", "context"]
+    assert request_state.previous_response_id is None
+    assert request_state.proxy_injected_previous_response_id is False
+    assert request_state.continuity_self_healed is True
+    self_heal_mock.assert_called_once_with(
+        surface="http_bridge",
+        reason="denied_proxy_anchor_before_dispatch",
+        previous_response_id="resp-denied",
+        session_id=request_state.session_id,
+    )
+
+
+@pytest.mark.asyncio
+async def test_submit_fails_closed_on_a_second_denial_within_the_same_submission(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The self-heal is bounded to one attempt per client request."""
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="denied-anchor-second-denial")
+    session.denied_proxy_injected_anchor_ids.add("resp-denied-again")
+    fresh_text = json.dumps({"type": "response.create", "input": ["full", "context"]})
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-denied-anchor-second-denial",
+        model="gpt-5.6",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        previous_response_id="resp-denied-again",
+        proxy_injected_previous_response_id=True,
+        proxy_injected_anchor_had_full_resend_payload=True,
+        fresh_upstream_request_text=fresh_text,
+        request_text='{"type":"response.create","previous_response_id":"resp-denied-again","input":[]}',
+        transport="http",
+        skip_request_log=True,
+        # Already healed once earlier in this same submission.
+        continuity_self_healed=True,
+    )
+    send_text = AsyncMock()
+    session.upstream = cast(
+        UpstreamWebSocket,
+        SimpleNamespace(send_text=send_text, close=AsyncMock()),
+    )
+    service._http_bridge_sessions[session.key] = session
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
+    monkeypatch.setattr(service, "_http_bridge_precreated_retry_allowed", AsyncMock(return_value=True))
+
+    with pytest.raises(ProxyResponseError) as exc_info:
+        await service._submit_http_bridge_request_with_handoff(
+            session,
+            request_state=request_state,
+            text_data=request_state.request_text or "{}",
+            queue_limit=8,
+            request_scope_id="scope-denied-anchor-second-denial",
+            owned_unanchored_handoff=False,
+        )
+
+    assert exc_info.value.status_code == 502
+    assert exc_info.value.payload["error"]["code"] == "stream_incomplete"
+    assert exc_info.value.upstream_error_code == "previous_response_not_found"
+    send_text.assert_not_awaited()
+    # A full-resend payload was available, so the denial is not dropped from
+    # the session: it is a genuine repeat denial, not a one-shot heal.
+    assert "resp-denied-again" in session.denied_proxy_injected_anchor_ids
+
+
+@pytest.mark.asyncio
+async def test_submit_drops_denied_anchor_from_session_when_full_context_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Without full context to reissue with, still fail closed but clear the denial.
+
+    A reattach/replay stage that only carries the anchor (no full input)
+    cannot be self-healed in place. Keep the fail-closed raise, but drop the
+    denied id from the session's injection state so the client's next
+    submission is not re-anchored to the same dead response id.
+    """
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    session = _make_bridge_session(key_value="denied-anchor-no-full-context")
+    session.denied_proxy_injected_anchor_ids.add("resp-denied-no-context")
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-denied-anchor-no-full-context",
+        model="gpt-5.6",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        previous_response_id="resp-denied-no-context",
+        proxy_injected_previous_response_id=True,
+        proxy_injected_anchor_had_full_resend_payload=False,
+        fresh_upstream_request_text=None,
+        request_text='{"type":"response.create","previous_response_id":"resp-denied-no-context","input":[]}',
+        transport="http",
+        skip_request_log=True,
+    )
+    send_text = AsyncMock()
+    session.upstream = cast(
+        UpstreamWebSocket,
+        SimpleNamespace(send_text=send_text, close=AsyncMock()),
+    )
+    service._http_bridge_sessions[session.key] = session
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
+    monkeypatch.setattr(service, "_http_bridge_precreated_retry_allowed", AsyncMock(return_value=True))
+
+    with pytest.raises(ProxyResponseError) as exc_info:
+        await service._submit_http_bridge_request_with_handoff(
+            session,
+            request_state=request_state,
+            text_data=request_state.request_text or "{}",
+            queue_limit=8,
+            request_scope_id="scope-denied-anchor-no-full-context",
+            owned_unanchored_handoff=False,
+        )
+
+    assert exc_info.value.status_code == 502
+    send_text.assert_not_awaited()
+    # The denial is dropped from the session's injection state so a later
+    # submission that resends full history is not fail-closed again.
+    assert "resp-denied-no-context" not in session.denied_proxy_injected_anchor_ids
+
+    # A subsequent submission carrying the same previous_response_id (the
+    # client's own retry, now with full history) must not be rejected by
+    # the membership check that just cleared.
+    next_request_state = proxy_service._WebSocketRequestState(
+        request_id="req-denied-anchor-no-full-context-retry",
+        model="gpt-5.6",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        previous_response_id="resp-denied-no-context",
+        proxy_injected_previous_response_id=True,
+        request_text='{"type":"response.create","previous_response_id":"resp-denied-no-context","input":["full"]}',
+        transport="http",
+        skip_request_log=True,
+    )
+    await service._submit_http_bridge_request_with_handoff(
+        session,
+        request_state=next_request_state,
+        text_data=next_request_state.request_text or "{}",
+        queue_limit=8,
+        request_scope_id="scope-denied-anchor-no-full-context-retry",
+        owned_unanchored_handoff=False,
+    )
+    send_text.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_submit_rejects_a_stale_durable_anchor_after_process_denial(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
