@@ -116,6 +116,7 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _proxy_admission_wait_timeout_seconds,
     _record_bridge_reattach,
     _record_continuity_fail_closed,
+    _record_continuity_self_heal,
     _release_http_bridge_denied_anchor_fences,
     _release_http_bridge_unanchored_handoff,
     _release_http_bridge_unanchored_handoffs_for_request,
@@ -1472,6 +1473,7 @@ class _HTTPBridgeStreamingMixin:
         durable_full_resend_is_account_neutral: bool | None = None
         durable_full_resend_has_safe_fresh_context = False
         durable_full_resend_retains_required_context_cache: bool | None = None
+        owner_unavailable_self_heal_via_proxy_injected_anchor = False
         durable_full_resend_proof = _verify_durable_full_resend(payload, durable_lookup)
         durable_full_resend_fresh_bridge_proof: _VerifiedDurableFullResend | None = None
         force_local_recovery_creation = False
@@ -2031,11 +2033,64 @@ class _HTTPBridgeStreamingMixin:
                 )
             return durable_full_resend_is_account_neutral
 
+        def owner_unavailable_allows_proxy_injected_self_heal() -> bool:
+            # Sibling to the durable-reconstruction path above, for the more
+            # common case: a proxy-injected anchor (no durable_lookup
+            # required) whose pre-injection payload already carried full
+            # context on its own (``proxy_injected_anchor_had_full_resend_payload``
+            # -- native Codex clients always resend full input). When the
+            # anchor's owner account is unavailable (cooldown/overloaded), the
+            # anchor is our own optimization, not something the client asked
+            # for, so drop it and let this submission route to a healthy
+            # account with full input, the same discriminator the dispatch-site
+            # denied-anchor self-heal in ``request_submit.py`` uses. Bounded to
+            # one heal per client request via ``continuity_self_healed``.
+            nonlocal durable_full_resend_fresh_payload
+            nonlocal durable_full_resend_is_account_neutral
+            if (
+                request_state.continuity_self_healed
+                or not request_state.proxy_injected_previous_response_id
+                or not request_state.proxy_injected_anchor_had_full_resend_payload
+                or request_state.fresh_upstream_request_text is None
+            ):
+                return False
+            if durable_full_resend_fresh_payload is None:
+                durable_full_resend_fresh_payload = _http_bridge_payload_without_previous_response_id(payload)
+            if durable_full_resend_is_account_neutral is None:
+                durable_full_resend_is_account_neutral = _http_bridge_payload_is_account_neutral_fresh_replay(
+                    durable_full_resend_fresh_payload
+                )
+            return durable_full_resend_is_account_neutral
+
         def owner_unavailable_allows_account_neutral_replay(exc: ProxyResponseError) -> bool:
-            return (
-                _http_bridge_is_previous_response_owner_unavailable(exc)
-                and durable_full_resend_allows_account_neutral_replay()
+            nonlocal owner_unavailable_self_heal_via_proxy_injected_anchor
+            owner_unavailable_self_heal_via_proxy_injected_anchor = False
+            if not _http_bridge_is_previous_response_owner_unavailable(exc):
+                return False
+            if durable_full_resend_allows_account_neutral_replay():
+                return True
+            if owner_unavailable_allows_proxy_injected_self_heal():
+                owner_unavailable_self_heal_via_proxy_injected_anchor = True
+                return True
+            return False
+
+        def record_owner_unavailable_self_heal_if_applicable(denied_previous_response_id: str | None) -> None:
+            # ``switch_to_account_neutral_replay`` rebuilds ``request_state``
+            # from scratch, so the self-heal bound flag and telemetry must be
+            # applied to the fresh object afterward, not the one the anchor
+            # was denied on; the denied id must be captured before that call
+            # rebinds ``effective_payload``.
+            nonlocal owner_unavailable_self_heal_via_proxy_injected_anchor
+            if not owner_unavailable_self_heal_via_proxy_injected_anchor:
+                return
+            _record_continuity_self_heal(
+                surface="http_bridge",
+                reason="owner_unavailable",
+                previous_response_id=denied_previous_response_id,
+                session_id=request_state.session_id,
             )
+            request_state.continuity_self_healed = True
+            owner_unavailable_self_heal_via_proxy_injected_anchor = False
 
         def switch_to_account_neutral_replay(
             *,
@@ -2302,7 +2357,9 @@ class _HTTPBridgeStreamingMixin:
                     cache_key_family=bridge_session_key.affinity_kind,
                     model_class=_extract_model_class(payload.model) if payload.model else None,
                 )
+                denied_owner_previous_response_id = effective_payload.previous_response_id
                 switch_to_account_neutral_replay()
+                record_owner_unavailable_self_heal_if_applicable(denied_owner_previous_response_id)
                 continue
             break
         if isinstance(session_or_forward, _HTTPBridgeOwnerForward):
@@ -2346,7 +2403,9 @@ class _HTTPBridgeStreamingMixin:
                     return
                 owner_forward_fresh_replay = owner_unavailable_allows_account_neutral_replay(exc)
                 if owner_forward_fresh_replay:
+                    denied_owner_forward_previous_response_id = effective_payload.previous_response_id
                     switch_to_account_neutral_replay()
+                    record_owner_unavailable_self_heal_if_applicable(denied_owner_forward_previous_response_id)
                 should_attempt_previous_response_recovery = not owner_forward_fresh_replay and (
                     effective_payload.previous_response_id is not None
                     and _http_bridge_should_attempt_local_previous_response_recovery(exc)
