@@ -5,6 +5,7 @@ import asyncio
 import json
 import logging
 import sys
+import time
 from dataclasses import replace
 from typing import Any, AsyncGenerator, AsyncIterator, Mapping, cast
 
@@ -34,6 +35,7 @@ from app.core.errors import (
 from app.core.errors import (
     synthetic_stream_failure_event as response_failed_event,
 )
+from app.core.openai.models import OpenAIError
 from app.core.openai.requests import ResponsesRequest, extract_input_file_ids
 from app.core.resilience.network_recovery import (
     NetworkRecoveryDecision,
@@ -773,6 +775,55 @@ class _StreamingRetryMixin:
             # tells the client when to come back (api.py emits the header).
             if exc.retry_after_seconds is None:
                 exc.retry_after_seconds = BURST_SURFACE_RETRY_AFTER_SECONDS
+
+        def _stamp_file_owner_bound_rate_limit_surface(
+            exc: ProxyResponseError,
+            parsed_error: OpenAIError | None,
+            *,
+            account: Account,
+        ) -> None:
+            """Fold a reset deadline into a surfaced file-owner-bound 429.
+
+            The request's ``input_image``/``input_file`` references a durable,
+            per-account upstream file id (``file_preferred_account_id`` --
+            see ``_stream_owner_bound_to``), so it cannot be replayed on
+            another account: moving it would hand account B a file handle it
+            does not own. ``verified_fresh_replay_payload`` never covers this
+            case either -- ``_verified_cross_transport_fresh_replay`` bails
+            whenever ``extract_input_file_ids`` finds a reference -- so the
+            request is stuck on the rejecting account by construction. The
+            client only gets one signal then: exactly when this account
+            clears. Upstream already reports ``resets_at``/
+            ``resets_in_seconds`` as separate JSON fields many clients never
+            render, so fold the deadline into the human-readable ``message``
+            too.
+            """
+            reset_at: float | None = None
+            if parsed_error is not None:
+                if parsed_error.resets_at is not None:
+                    reset_at = float(parsed_error.resets_at)
+                elif parsed_error.resets_in_seconds is not None:
+                    reset_at = clock.time() + float(parsed_error.resets_in_seconds)
+            _facade().logger.info(
+                "Surfacing usage-limit rate limit on file-owner-bound account instead of "
+                "failing over (input file/image reference is not portable across accounts) "
+                "request_id=%s account_id=%s file_preferred_account_id=%s reset_at=%s",
+                request_id,
+                account.id,
+                file_preferred_account_id,
+                reset_at,
+            )
+            if reset_at is None:
+                return
+            payload_error = exc.payload.get("error") if isinstance(exc.payload, dict) else None
+            if not isinstance(payload_error, dict):
+                return
+            reset_at_text = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(reset_at))
+            base_message = str(payload_error.get("message") or "").rstrip()
+            if reset_at_text in base_message:
+                return
+            suffix = f"This account's usage limit resets at {reset_at_text}."
+            payload_error["message"] = f"{base_message} {suffix}" if base_message else suffix
 
         async def _drain_pending_post_refresh_penalty_on_terminal(
             current_settlement: _StreamSettlement,
@@ -2659,6 +2710,12 @@ class _StreamingRetryMixin:
                                 setattr(tex, _STREAM_HEALTH_RECORDED_ATTR, True)
                                 if burst:
                                     _stamp_surfaced_burst_retry_after(tex)
+                                if (
+                                    classified["failure_class"] == "rate_limit"
+                                    and file_preferred_account_id is not None
+                                    and account.id == file_preferred_account_id
+                                ):
+                                    _stamp_file_owner_bound_rate_limit_surface(tex, error, account=account)
                                 raise
                             error_payload: UpstreamError = (
                                 tex.error

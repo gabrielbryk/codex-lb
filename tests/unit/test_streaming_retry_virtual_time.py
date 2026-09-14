@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
+import time
 from types import SimpleNamespace
 from typing import Any, AsyncIterator, Coroutine, cast
 from unittest.mock import AsyncMock
@@ -388,6 +390,118 @@ async def test_owner_bound_burst_429_backoff_parks_on_the_injected_scheduler(
         assert all(task.done() for task in scheduler.owned_tasks)
     finally:
         await scheduler.cancel_owned_tasks()
+
+
+@pytest.mark.asyncio
+async def test_file_owner_bound_usage_limit_429_surfaces_with_reset_time_and_logs(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A usage-limit 429 on a file-owner-bound image request cannot fail over.
+
+    The request's ``input_image`` references a durable, per-account upstream
+    file id, so ``_stream_owner_bound_to`` binds it to the rejecting account
+    (moving it would hand another account a file handle it does not own; see
+    ``extract_input_file_ids`` / ``_verified_cross_transport_fresh_replay``,
+    which never verifies a fresh-replay payload for a file-bearing request).
+    The proxy must surface the rejection -- never fail over -- but it should
+    fold a reset deadline into the message and log the decision so the
+    surfaced 429 is actionable and diagnosable.
+    """
+    settings = _make_proxy_settings()
+    request_logs = _RequestLogsRecorder()
+    service, clock, scheduler = _virtual_service(request_logs)
+    account = _make_account("acc_file_owner_locked")
+    attempts = 0
+    reset_in_seconds = 1800
+    # The surfaced reset time is stamped from the injected clock's ``time()``
+    # (an absolute deadline), never a raw ``time.time()`` read -- this module
+    # is under the timing-seam checker (``scripts/check_proxy_timing_seams.py``).
+    wall_now = clock.time()
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    select_account = AsyncMock(return_value=AccountSelection(account=account, error_message=None))
+    monkeypatch.setattr(service, "_select_account_with_budget_compatible", select_account)
+    monkeypatch.setattr(service, "_ensure_fresh_with_budget", AsyncMock(side_effect=lambda account, **_k: account))
+    monkeypatch.setattr(service, "_handle_stream_error", AsyncMock(return_value={"failure_class": "rate_limit"}))
+    monkeypatch.setattr(service, "_write_request_log", AsyncMock())
+    monkeypatch.setattr(service._load_balancer, "record_success", AsyncMock())
+    monkeypatch.setattr(service._load_balancer, "record_errors", AsyncMock())
+
+    async def fake_stream_once(_account: Account, *_args: object, **_kwargs: object) -> AsyncIterator[str]:
+        nonlocal attempts
+        attempts += 1
+        raise ProxyResponseError(
+            429,
+            cast(
+                Any,
+                {
+                    "error": {
+                        "message": "You've hit your usage limit for the GPT-5.1 model.",
+                        "type": "usage_limit_reached",
+                        "code": "usage_limit_reached",
+                        "resets_in_seconds": reset_in_seconds,
+                    }
+                },
+            ),
+            failure_phase="status",
+        )
+        yield ""  # pragma: no cover - unreachable; keeps this an async generator
+
+    monkeypatch.setattr(service, "_stream_once", fake_stream_once)
+    # A ``file_id`` input_image references a durable per-account upstream
+    # file; this is what makes the request owner-bound (not inline/portable).
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.1",
+            "instructions": "",
+            "input": [{"type": "input_image", "file_id": "file-owner-locked"}],
+            "stream": True,
+        }
+    )
+
+    async def collect() -> list[str]:
+        return [
+            chunk
+            async for chunk in service._stream_with_retry(
+                payload,
+                {"session_id": "sid-file-owner"},
+                codex_session_affinity=False,
+                propagate_http_errors=True,
+                openai_cache_affinity=False,
+                api_key=None,
+                api_key_reservation=None,
+                suppress_text_done_events=False,
+                request_transport="http",
+                rewritten_file_account_id=account.id,
+                file_account_resolution_complete=True,
+                upstream_stream_transport_override="http",
+            )
+        ]
+
+    caplog.set_level(logging.INFO, logger="app.modules.proxy.service")
+    consumer = scheduler.create_task(collect())
+    try:
+        await scheduler.drain()
+        with pytest.raises(ProxyResponseError) as exc_info:
+            await consumer
+    finally:
+        await scheduler.cancel_owned_tasks()
+
+    # Never re-selected another account: the file reference cannot move.
+    assert attempts == 1
+    assert select_account.await_count == 1
+    surfaced = exc_info.value
+    assert surfaced.status_code == 429
+    message = str(surfaced.payload["error"]["message"])
+    expected_reset_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(wall_now + reset_in_seconds))
+    assert expected_reset_at in message
+    assert "resets" in message.lower()
+    assert any(
+        "file-owner-bound" in record.message and "acc_file_owner_locked" in record.message for record in caplog.records
+    )
+    assert all(task.done() for task in scheduler.owned_tasks)
 
 
 @pytest.mark.asyncio
