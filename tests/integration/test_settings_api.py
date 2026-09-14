@@ -77,9 +77,6 @@ async def test_settings_api_get_and_update(async_client):
     assert payload["relativeAvailabilityPower"] == 2.0
     assert payload["relativeAvailabilityTopK"] == 5
     assert payload["singleAccountId"] is None
-    assert payload["subscriptionOverflowSourceId"] is None
-    assert payload["subscriptionOverflowDrainUntil"] is None
-    assert payload["subscriptionOverflowPinsExpireBy"] is None
     assert payload["openaiCacheAffinityMaxAgeSeconds"] == 1800
     assert payload["dashboardSessionTtlSeconds"] == 31536000
     assert payload["httpResponsesSessionBridgePromptCacheIdleTtlSeconds"] == 3600
@@ -90,7 +87,6 @@ async def test_settings_api_get_and_update(async_client):
     assert payload["warmupModel"] == "gpt-5.4-mini"
     assert payload["importWithoutOverwrite"] is True
     assert payload["totpRequiredOnLogin"] is False
-    assert payload["totpConfigured"] is False
     assert payload["apiKeyAuthEnabled"] is False
     assert payload["hideUpstreamQuotaFromApiKeys"] is False
     assert payload["limitWarmupEnabled"] is False
@@ -185,7 +181,6 @@ async def test_settings_api_get_and_update(async_client):
     assert updated["warmupModel"] == "gpt-5.4-nano"
     assert updated["importWithoutOverwrite"] is False
     assert updated["totpRequiredOnLogin"] is False
-    assert updated["totpConfigured"] is False
     assert updated["apiKeyAuthEnabled"] is True
     assert updated["hideUpstreamQuotaFromApiKeys"] is True
     assert updated["limitWarmupEnabled"] is True
@@ -235,7 +230,6 @@ async def test_settings_api_get_and_update(async_client):
     assert payload["warmupModel"] == "gpt-5.4-nano"
     assert payload["importWithoutOverwrite"] is False
     assert payload["totpRequiredOnLogin"] is False
-    assert payload["totpConfigured"] is False
     assert payload["apiKeyAuthEnabled"] is True
     assert payload["hideUpstreamQuotaFromApiKeys"] is True
     assert payload["limitWarmupEnabled"] is True
@@ -382,6 +376,8 @@ async def test_settings_api_reports_stream_limit_provenance_in_each_state(async_
         # M1 stream/bridge budgets
         "http_responses_stream_request_budget_seconds",
         "http_responses_session_bridge_request_budget_seconds",
+        # Thread cache identity mode
+        "thread_cache_identity_mode",
     }
     # Retention is database-only: no environment value, NULL reads as default.
     assert provenance["request_log_retention_days"] == {"source": "default", "envValue": None, "default": 0}
