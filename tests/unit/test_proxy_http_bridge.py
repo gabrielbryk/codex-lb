@@ -17484,6 +17484,11 @@ def _make_owner_unavailable_self_heal_harness(
         "lookup_request_targets",
         AsyncMock(return_value=durable_lookup),
     )
+    monkeypatch.setattr(
+        service._durable_bridge,
+        "lookup_recovery_attempt",
+        AsyncMock(return_value=None),
+    )
     monkeypatch.setattr(service, "_http_bridge_has_live_local_session", AsyncMock(return_value=False))
     monkeypatch.setattr(service, "_http_bridge_can_forward_to_active_owner", AsyncMock(return_value=False))
     monkeypatch.setattr(service, "_resolve_websocket_previous_response_owner", AsyncMock(return_value="acc-1"))
@@ -17664,6 +17669,242 @@ async def test_stream_via_http_bridge_owner_unavailable_without_full_context_sti
     # was; it fails the same way again only for as long as the account
     # actually stays unavailable.
     assert prepared_previous_response_ids[-1] == "resp_latest"
+
+
+@pytest.mark.asyncio
+async def test_stream_via_http_bridge_self_heals_owner_unavailable_client_full_resend_no_anchor_injected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reproduces the live 2026-09-14 07:03-07:08Z incident (request_id
+    8b93e680-cea6-4c7f-bce4-54f7a72fd107): a native Codex client always
+    resends its full input (including retained prior assistant output) with
+    no client-supplied ``previous_response_id``. When that verified full
+    resend proves it already carries the durable turn's complete context
+    (``_VerifiedDurableFullResend.matches``), the fresh-reattach branch takes
+    the ``client_unanchored_full_resend`` path and never injects a
+    ``previous_response_id`` anchor -- so ``proxy_injected_previous_response_id``
+    and ``fresh_upstream_request_text`` are never set. ``preferred_account_id``
+    is still pinned to the durable owner because ``bridge_session_key.strength
+    == "hard"`` (turn-state header affinity). When that owner account is
+    unavailable (24x ``server_is_overloaded`` in the live incident), account
+    selection raises ``previous_response_owner_unavailable``, and
+    ``owner_unavailable_allows_proxy_injected_self_heal`` denies self-heal
+    because it gates on ``proxy_injected_previous_response_id`` -- a flag
+    this code path never sets. The request fails closed with zero
+    ``continuity_self_heal`` log lines, exactly matching the live log.
+    """
+    prefix_items = [{"role": "user", "content": "one"}]
+    retained_output = {
+        "type": "message",
+        "role": "assistant",
+        "content": [{"type": "output_text", "text": "two"}],
+    }
+    input_items = [*prefix_items, retained_output, {"role": "user", "content": "three"}]
+    service, payload, _unused, prepared_previous_response_ids = _make_owner_unavailable_self_heal_harness(
+        monkeypatch, input_items=input_items
+    )
+
+    owner_unavailable = proxy_service.ProxyResponseError(
+        502,
+        {
+            "error": {
+                "type": "server_error",
+                "code": "previous_response_owner_unavailable",
+                "message": "Previous response owner account is unavailable; retry later.",
+            }
+        },
+    )
+    get_or_create_calls = 0
+    get_or_create_kwargs: list[dict[str, object]] = []
+
+    async def fake_get_or_create_http_bridge_session(*args: object, **kwargs: object):
+        nonlocal get_or_create_calls
+        get_or_create_calls += 1
+        get_or_create_kwargs.append(dict(kwargs))
+        if get_or_create_calls == 1:
+            raise owner_unavailable
+        # Second attempt (the self-healed retry, if any): a healthy account
+        # picks up the account-neutral replay.
+        key = cast(proxy_service._HTTPBridgeSessionKey, args[0])
+        session = _make_bridge_session(key=key, key_value=key.affinity_key)
+        session.account = cast(Any, SimpleNamespace(id="acc-2", status=AccountStatus.ACTIVE, plan_type="plus"))
+        return session
+
+    monkeypatch.setattr(service, "_get_or_create_http_bridge_session", fake_get_or_create_http_bridge_session)
+
+    self_heal_calls: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        http_bridge_streaming_module,
+        "_record_continuity_self_heal",
+        lambda **kwargs: self_heal_calls.append(kwargs),
+    )
+
+    # The pre-existing durable-reconstruction self-heal
+    # (``durable_full_resend_allows_account_neutral_replay``) builds its
+    # candidate replay by re-projecting the input through
+    # ``project_responses_input_for_account_neutral_fresh_replay`` (default
+    # ``preserve_developer_message_ids=False``, stripping response-owned
+    # bookkeeping for an actual cross-account replay). That projection can
+    # fail for payload shapes the classification-only call (which uses
+    # ``preserve_developer_message_ids=True`` and always succeeds here)
+    # tolerates -- e.g. an inline Responses-Lite developer message whose id
+    # must stay visible for classification but cannot survive an actual
+    # replay. When the real projection fails, the durable-reconstruction
+    # self-heal is unavailable even though the client's own untouched
+    # full-resend body (this test's new self-heal path) needs no projection
+    # at all and remains perfectly replayable. Force exactly that split.
+    real_project_replay = http_bridge_streaming_module.project_responses_input_for_account_neutral_fresh_replay
+
+    def fake_project_replay(
+        input_items: list[Any], *, stored_count: int, preserve_developer_message_ids: bool = False
+    ) -> Any:
+        if not preserve_developer_message_ids:
+            return None
+        return real_project_replay(
+            input_items, stored_count=stored_count, preserve_developer_message_ids=preserve_developer_message_ids
+        )
+
+    monkeypatch.setattr(
+        http_bridge_streaming_module,
+        "project_responses_input_for_account_neutral_fresh_replay",
+        fake_project_replay,
+    )
+
+    async def fake_stream_http_bridge_session_events(*args: object, **kwargs: object):
+        del args, kwargs
+        if False:
+            yield ""
+
+    monkeypatch.setattr(service, "_stream_http_bridge_session_events", fake_stream_http_bridge_session_events)
+
+    chunks = [
+        chunk
+        async for chunk in service._stream_via_http_bridge(
+            payload,
+            headers={
+                "x-codex-session-id": "session-owner-unavailable-full-resend",
+                "x-codex-turn-state": "http_turn_fresh",
+            },
+            codex_session_affinity=True,
+            propagate_http_errors=False,
+            openai_cache_affinity=False,
+            api_key=None,
+            api_key_reservation=None,
+            suppress_text_done_events=False,
+            idle_ttl_seconds=120.0,
+            codex_idle_ttl_seconds=1800.0,
+            max_sessions=8,
+            queue_limit=4,
+        )
+    ]
+
+    # FAILS on current (unpatched) code: the first ``_get_or_create_http_bridge_session``
+    # raises ``previous_response_owner_unavailable`` and self-heal never
+    # applies (no proxy-injected previous_response_id anchor exists to drop),
+    # so the exception propagates instead of a second, healed attempt -- the
+    # live incident's exact zero-self-heal-line 502.
+    assert chunks == []
+    assert get_or_create_calls == 2
+    assert get_or_create_kwargs[0]["preferred_account_id"] == "acc-1"
+    assert len(self_heal_calls) == 1
+    assert self_heal_calls[0]["surface"] == "http_bridge"
+    assert self_heal_calls[0]["reason"] == "owner_unavailable"
+
+
+@pytest.mark.asyncio
+async def test_stream_via_http_bridge_owner_unavailable_file_required_account_still_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A file-required account pin must never self-heal away.
+
+    Same full-resend, retains-prior-output shape as the account-only
+    self-heal test above (so ``proxy_injected_account_only_continuity``
+    would otherwise apply), but the request also carries a rewritten input
+    file that forces ``preferred_account_id`` onto a specific account for
+    file-access reasons, not merely as a continuity optimization. Dropping
+    that pin would silently break file access on the healed retry, so the
+    new self-heal path must stay guarded by ``file_required_preferred_account``
+    and keep failing closed exactly like the pre-existing no-full-context
+    case.
+    """
+    prefix_items = [{"role": "user", "content": "one"}]
+    retained_output = {
+        "type": "message",
+        "role": "assistant",
+        "content": [{"type": "output_text", "text": "two"}],
+    }
+    input_items = [*prefix_items, retained_output, {"role": "user", "content": "three"}]
+    service, payload, _unused, prepared_previous_response_ids = _make_owner_unavailable_self_heal_harness(
+        monkeypatch, input_items=input_items
+    )
+    # Isolate the owner-unavailable self-heal decision under test from the
+    # unrelated unanchored-fork-cap-spill fallback, which can independently
+    # retry a denied preferred account for other error codes.
+    monkeypatch.setattr(
+        http_bridge_streaming_module,
+        "_http_bridge_unanchored_fork_can_spill_on_cap",
+        lambda **kwargs: False,
+    )
+
+    owner_unavailable = proxy_service.ProxyResponseError(
+        502,
+        {
+            "error": {
+                "type": "server_error",
+                "code": "previous_response_owner_unavailable",
+                "message": "Previous response owner account is unavailable; retry later.",
+            }
+        },
+    )
+    get_or_create_calls = 0
+
+    async def fake_get_or_create_http_bridge_session(*args: object, **kwargs: object):
+        nonlocal get_or_create_calls
+        get_or_create_calls += 1
+        del args, kwargs
+        raise owner_unavailable
+
+    monkeypatch.setattr(service, "_get_or_create_http_bridge_session", fake_get_or_create_http_bridge_session)
+
+    self_heal_calls: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        http_bridge_streaming_module,
+        "_record_continuity_self_heal",
+        lambda **kwargs: self_heal_calls.append(kwargs),
+    )
+
+    async def collect_chunks() -> list[str]:
+        return [
+            chunk
+            async for chunk in service._stream_via_http_bridge(
+                payload,
+                headers={
+                    "x-codex-session-id": "session-owner-unavailable-file-required",
+                    "x-codex-turn-state": "http_turn_fresh",
+                },
+                codex_session_affinity=True,
+                propagate_http_errors=False,
+                openai_cache_affinity=False,
+                api_key=None,
+                api_key_reservation=None,
+                suppress_text_done_events=False,
+                idle_ttl_seconds=120.0,
+                codex_idle_ttl_seconds=1800.0,
+                max_sessions=8,
+                queue_limit=4,
+                # Simulate a client-attached input file: the caller
+                # (``_stream_http_bridge_or_retry``) would normally resolve
+                # this from the payload's file references before dispatch.
+                rewritten_file_account_id="acc-1",
+            )
+        ]
+
+    with pytest.raises(ProxyResponseError) as exc_info:
+        await collect_chunks()
+
+    assert exc_info.value.payload["error"]["code"] == "previous_response_owner_unavailable"
+    assert get_or_create_calls == 1
+    assert self_heal_calls == []
 
 
 @pytest.mark.asyncio

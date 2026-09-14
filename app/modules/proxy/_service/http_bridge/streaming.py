@@ -1466,6 +1466,16 @@ class _HTTPBridgeStreamingMixin:
         effective_payload = payload
         untrimmed_effective_payload = payload
         proxy_injected_previous_response_id = False
+        # True only for the "client_unanchored_full_resend" branch below: the
+        # client's own full-resend payload already proved it carries the
+        # durable turn's complete context, so no previous_response_id anchor
+        # is injected at all -- but ``preferred_account_id`` is still pinned
+        # to the durable owner by hard session/turn-state affinity
+        # (``bridge_session_key.strength == "hard"``). Unlike the
+        # proxy-injected-anchor case, there is nothing to strip from the
+        # payload before an account-neutral replay: the client's own body is
+        # already the fresh form.
+        proxy_injected_account_only_continuity = False
         fresh_upstream_request_text: str | None = None
         client_full_resend_fresh_upstream_request_text: str | None = None
         previous_response_trimmed_input_count: int | None = None
@@ -1728,6 +1738,15 @@ class _HTTPBridgeStreamingMixin:
                     # The client already supplied a proved complete fresh
                     # request. Adding a durable anchor here can strand it on
                     # the new WebSocket.
+                    if bridge_session_key.strength == "hard":
+                        # ``preferred_account_id`` below still pins this
+                        # request to the durable owner via hard session
+                        # affinity even though no previous_response_id anchor
+                        # was injected; mark it so an owner-unavailable
+                        # denial can self-heal by dropping that pin instead
+                        # of failing closed (support.py
+                        # owner_unavailable_allows_proxy_injected_self_heal).
+                        proxy_injected_account_only_continuity = True
                     _log_http_bridge_event(
                         "fresh_reattach_full_resend_preserved",
                         bridge_session_key,
@@ -1957,6 +1976,17 @@ class _HTTPBridgeStreamingMixin:
             # Only the trim branch below (which verifies the stored prefix
             # fingerprint) is allowed to flip this flag to ``True``.
             request_state.fresh_upstream_request_is_retry_safe = False
+        elif (
+            proxy_injected_account_only_continuity
+            and request_state.previous_response_id is None
+            and not file_required_preferred_account
+        ):
+            # A file-required account pin is a hard constraint (the file is
+            # only accessible on that account), never an optimization to
+            # self-heal away, so it must not enable this flag even though it
+            # also drives ``preferred_account_id`` via
+            # ``resolve_required_account_id`` above.
+            request_state.proxy_injected_account_only_continuity = True
         elif (
             effective_payload.previous_response_id is not None
             and payload_looks_like_full_resend

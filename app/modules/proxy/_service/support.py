@@ -1069,6 +1069,16 @@ class _WebSocketRequestState:
     # explicit turn-state header guarantees continuity for stale recovery.
     hard_continuity_anchor: bool = False
     proxy_injected_previous_response_id: bool = False
+    # True when ``preferred_account_id`` is pinned only by proxy-managed hard
+    # session/turn-state affinity (no client-supplied or proxy-injected
+    # ``previous_response_id`` anchor at all): the client's own full-resend
+    # payload already proved it carries the durable turn's complete context
+    # (see the "client_unanchored_full_resend" branch in
+    # ``http_bridge/streaming.py``), so there is no anchor to strip before a
+    # self-healed account-neutral replay -- only the account pin needs
+    # dropping. Sibling to ``proxy_injected_previous_response_id`` for
+    # ``owner_unavailable_allows_proxy_injected_self_heal`` below.
+    proxy_injected_account_only_continuity: bool = False
     # Set once this submission has already self-healed a denied
     # proxy-injected anchor by dropping it and reissuing with full context
     # (see the dispatch-site check in ``request_submit.py``). Bounds the
@@ -1753,19 +1763,29 @@ def owner_unavailable_allows_proxy_injected_self_heal(request_state: _WebSocketR
     place instead of failing the request closed.
 
     Shared gate between the HTTP-bridge submit path and the WebSocket
-    connect path: true only for a proxy-injected anchor (our own
-    optimization, not something the client asked for) whose pre-injection
-    payload already carried full context on its own, that has not already
-    been healed once for this client request. Callers still must confirm
-    the account-neutral replay check appropriate to their own effective
-    payload/request text before actually healing.
+    connect path: true for either of two proxy-managed (not client-asked-for)
+    continuity mechanisms whose denial can be healed by retrying on another
+    account:
+
+    * A proxy-injected ``previous_response_id`` anchor whose pre-injection
+      payload already carried full context on its own.
+    * Pure hard session/turn-state affinity with no anchor at all
+      (``proxy_injected_account_only_continuity``): the client's own payload
+      was already proved to carry the durable turn's complete context, so
+      only the account pin needs dropping, not any payload rewrite.
+
+    True only when not already healed once for this client request. Callers
+    still must confirm the account-neutral replay check appropriate to their
+    own effective payload/request text before actually healing.
     """
-    return not (
-        request_state.continuity_self_healed
-        or not request_state.proxy_injected_previous_response_id
-        or not request_state.proxy_injected_anchor_had_full_resend_payload
-        or request_state.fresh_upstream_request_text is None
-    )
+    if request_state.continuity_self_healed:
+        return False
+    if request_state.proxy_injected_previous_response_id:
+        return (
+            request_state.proxy_injected_anchor_had_full_resend_payload
+            and request_state.fresh_upstream_request_text is not None
+        )
+    return request_state.proxy_injected_account_only_continuity
 
 
 def _websocket_request_is_accepted_lifecycle_only(request_state: _WebSocketRequestState) -> bool:
