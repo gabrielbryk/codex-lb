@@ -17819,6 +17819,11 @@ def _make_owner_unavailable_self_heal_harness(
         "lookup_recovery_attempt",
         AsyncMock(return_value=None),
     )
+    monkeypatch.setattr(
+        service._durable_bridge,
+        "retire_continuity_owner_if_unavailable",
+        AsyncMock(return_value=False),
+    )
     monkeypatch.setattr(service, "_http_bridge_has_live_local_session", AsyncMock(return_value=False))
     monkeypatch.setattr(service, "_http_bridge_can_forward_to_active_owner", AsyncMock(return_value=False))
     monkeypatch.setattr(service, "_resolve_websocket_previous_response_owner", AsyncMock(return_value="acc-1"))

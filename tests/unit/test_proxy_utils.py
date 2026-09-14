@@ -10121,20 +10121,25 @@ async def test_native_codex_stream_surfaces_local_pre_dispatch_refusal_as_unmark
         raise _refusal(local_pre_dispatch_refusal=False)
         yield ""  # pragma: no cover
 
-    # The same error without the provenance flag still ends the native stream
-    # without a terminal: the flag is the whole of the new behaviour.
-    with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
-        _ = [
-            event
-            async for event in proxy_api._stream_response_error_events(
-                unflagged_stream(),
-                owns_reservation=False,
-                reservation=None,
-                preserve_native_failure_lifecycle=True,
-            )
-        ]
-
-    assert _proxy_error_code(exc_info.value) == "stream_incomplete"
+    # A genuine upstream transport failure now emits the fork's named,
+    # retryable terminal instead of closing the committed native stream with
+    # no body. The local-refusal provenance above keeps that distinct from the
+    # proxy-generated fail-closed terminal.
+    unflagged_events = [
+        parse_sse_data_json(event_block)
+        async for event_block in proxy_api._stream_response_error_events(
+            unflagged_stream(),
+            owns_reservation=False,
+            reservation=None,
+            preserve_native_failure_lifecycle=True,
+        )
+    ]
+    assert len(unflagged_events) == 1
+    assert unflagged_events[0] is not None
+    unflagged_response = cast(dict[str, JsonValue], unflagged_events[0]["response"])
+    unflagged_error = cast(dict[str, JsonValue], unflagged_response["error"])
+    assert unflagged_error["code"] == "rate_limit_exceeded"
+    assert "Please try again in 5s." in cast(str, unflagged_error["message"])
 
 
 def test_stream_startup_error_response_preserves_exact_retry_after_header() -> None:
