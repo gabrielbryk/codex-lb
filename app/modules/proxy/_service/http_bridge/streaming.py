@@ -211,6 +211,9 @@ from app.modules.proxy._service.support import (
 from app.modules.proxy._service.support import (
     _websocket_route_log_kwargs as _websocket_route_log_kwargs,
 )
+from app.modules.proxy._service.support import (
+    owner_unavailable_allows_proxy_injected_self_heal as _owner_unavailable_allows_proxy_injected_self_heal_context,
+)
 from app.modules.proxy._service.warmup import (
     WarmupExecutionData as WarmupExecutionData,
 )
@@ -2047,12 +2050,7 @@ class _HTTPBridgeStreamingMixin:
             # one heal per client request via ``continuity_self_healed``.
             nonlocal durable_full_resend_fresh_payload
             nonlocal durable_full_resend_is_account_neutral
-            if (
-                request_state.continuity_self_healed
-                or not request_state.proxy_injected_previous_response_id
-                or not request_state.proxy_injected_anchor_had_full_resend_payload
-                or request_state.fresh_upstream_request_text is None
-            ):
+            if not _owner_unavailable_allows_proxy_injected_self_heal_context(request_state):
                 return False
             if durable_full_resend_fresh_payload is None:
                 durable_full_resend_fresh_payload = _http_bridge_payload_without_previous_response_id(payload)

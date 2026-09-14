@@ -319,6 +319,9 @@ from app.modules.proxy._service.observability import (
     _record_continuity_owner_resolution as _record_continuity_owner_resolution,
 )
 from app.modules.proxy._service.observability import (
+    _record_continuity_self_heal as _record_continuity_self_heal,
+)
+from app.modules.proxy._service.observability import (
     _record_upstream_transport_decision as _record_upstream_transport_decision,
 )
 from app.modules.proxy._service.observability import (
@@ -366,6 +369,9 @@ from app.modules.proxy._service.support import (
 )
 from app.modules.proxy._service.support import (
     _websocket_route_log_kwargs as _websocket_route_log_kwargs,
+)
+from app.modules.proxy._service.support import (
+    owner_unavailable_allows_proxy_injected_self_heal as _owner_unavailable_allows_proxy_injected_self_heal_context,
 )
 from app.modules.proxy._service.warmup import (
     WarmupExecutionData as WarmupExecutionData,
@@ -4036,6 +4042,69 @@ class _WebSocketMixin:
             if proxy._remaining_budget_seconds(deadline) <= 0:
                 break
 
+        async def attempt_owner_unavailable_self_heal() -> Account | None:
+            # Sibling to the HTTP-bridge submit path's proxy-injected-anchor
+            # self-heal (streaming.py): a proxy-injected continuity anchor is
+            # our own optimization, not something the client asked for, so
+            # when its owner account is unavailable and the pre-injection
+            # payload already carried full context on its own, drop the pin
+            # and reselect account-neutral instead of failing the connect
+            # closed. Bounded to one heal per client request via
+            # ``continuity_self_healed``.
+            if not _owner_unavailable_allows_proxy_injected_self_heal_context(request_state):
+                return None
+            if not _facade()._websocket_request_text_is_account_neutral_fresh_replay(
+                request_state.fresh_upstream_request_text
+            ):
+                return None
+            request_state.proxy_injected_previous_response_id = False
+            request_state.preferred_account_id = None
+            request_state.replay_required_account_id = None
+            request_state.continuity_self_healed = True
+            _record_continuity_self_heal(
+                surface="websocket_connect",
+                reason="owner_unavailable",
+                previous_response_id=request_state.previous_response_id,
+                session_id=request_state.session_id,
+            )
+            healed_selection = await proxy._select_account_with_budget_compatible(
+                deadline,
+                request_id=request_state.request_log_id or request_state.request_id,
+                kind="websocket",
+                api_key=api_key,
+                sticky_key=sticky_key,
+                sticky_kind=sticky_kind,
+                reallocate_sticky=reallocate_sticky,
+                sticky_source=request_state.affinity_policy.codex_session_source,
+                legacy_sticky_key=request_state.affinity_policy.legacy_selection_key,
+                legacy_continuity_source=request_state.affinity_policy.legacy_continuity_source,
+                sticky_seed_key=request_state.affinity_policy.seed_selection_key,
+                sticky_seed_kind=request_state.affinity_policy.seed_selection_kind,
+                spill_bare_session_on_account_cap=request_state.affinity_policy.spill_on_account_cap,
+                abandon_unavailable_legacy_owner=(request_state.affinity_policy.abandon_unavailable_legacy_owner),
+                require_unambiguous_account=request_state.affinity_policy.require_unambiguous_account,
+                sticky_max_age_seconds=sticky_max_age_seconds,
+                prefer_earlier_reset_accounts=prefer_earlier_reset,
+                prefer_earlier_reset_window=prefer_earlier_reset_window,
+                routing_strategy=routing_strategy,
+                model=model,
+                service_tier=request_state.requested_service_tier,
+                exclude_account_ids=exclude_account_ids,
+                preferred_account_id=None,
+                require_security_work_authorized=require_security_work_authorized,
+                lease_kind="stream",
+                request_stage=request_state.request_stage,
+                estimated_lease_tokens=_facade()._estimated_lease_tokens_from_request_usage_budget(
+                    request_state.request_usage_budget
+                ),
+                fallback_on_preferred_account_unavailable=True,
+            )
+            healed_account = healed_selection.account
+            if healed_account is None:
+                return None
+            request_state.websocket_stream_lease = healed_selection.lease
+            return healed_account
+
         account = selection.account
         if (
             account is not None
@@ -4052,6 +4121,9 @@ class _WebSocketMixin:
             and account.id != preferred_account_id
         ):
             await proxy._load_balancer.release_account_lease(selection.lease)
+            healed_account = await attempt_owner_unavailable_self_heal()
+            if healed_account is not None:
+                return healed_account
             message = "Previous response owner account is unavailable; retry later."
             _record_continuity_fail_closed(
                 surface="websocket_connect",
@@ -4130,6 +4202,9 @@ class _WebSocketMixin:
                     error_message=error_message,
                 )
                 return None
+            healed_account = await attempt_owner_unavailable_self_heal()
+            if healed_account is not None:
+                return healed_account
             message = "Previous response owner account is unavailable; retry later."
             _record_continuity_fail_closed(
                 surface="websocket_connect",

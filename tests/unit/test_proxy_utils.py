@@ -24901,6 +24901,176 @@ async def test_select_websocket_connect_account_records_fail_closed_for_preferre
 
 
 @pytest.mark.asyncio
+async def test_select_websocket_connect_account_self_heals_owner_unavailable_for_preferred_account_mismatch(
+    monkeypatch,
+    caplog,
+):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="ws_req_prev_owner_mismatch_self_heal",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        previous_response_id="resp_prev_owner",
+        preferred_account_id="acc_owner",
+        session_id="turn_ws_owner_mismatch_self_heal",
+        proxy_injected_previous_response_id=True,
+        proxy_injected_anchor_had_full_resend_payload=True,
+        fresh_upstream_request_text='{"type":"response.create"}',
+    )
+    mismatched_account = _make_account("acc_other")
+    healed_account = _make_account("acc_healed")
+    fail_closed_counter = _ObservedCounter()
+    self_heal_counter = _ObservedCounter()
+
+    monkeypatch.setattr(proxy_service, "PROMETHEUS_AVAILABLE", True)
+    monkeypatch.setattr(proxy_service, "continuity_fail_closed_total", fail_closed_counter, raising=False)
+    monkeypatch.setattr(proxy_service, "continuity_self_heal_total", self_heal_counter, raising=False)
+    monkeypatch.setattr(
+        proxy_service,
+        "_websocket_request_text_is_account_neutral_fresh_replay",
+        lambda text: True,
+    )
+    select_account = AsyncMock(
+        side_effect=[
+            AccountSelection(account=mismatched_account, error_message=None),
+            AccountSelection(account=healed_account, error_message=None),
+        ]
+    )
+    monkeypatch.setattr(service, "_select_account_with_budget", select_account)
+    release_account_lease = AsyncMock()
+    monkeypatch.setattr(service._load_balancer, "release_account_lease", release_account_lease)
+    emit_connect_failure = AsyncMock()
+    monkeypatch.setattr(service, "_emit_websocket_connect_failure", emit_connect_failure)
+
+    caplog.set_level(logging.WARNING, logger="app.modules.proxy.service")
+    result = await service._select_websocket_connect_account(
+        10_000.0,
+        sticky_key=None,
+        sticky_kind=None,
+        prefer_earlier_reset=False,
+        prefer_earlier_reset_window="secondary",
+        routing_strategy="usage_weighted",
+        model="gpt-5.1",
+        request_state=request_state,
+        api_key=None,
+        client_send_lock=anyio.Lock(),
+        websocket=cast(WebSocket, SimpleNamespace()),
+        reallocate_sticky=False,
+        sticky_max_age_seconds=None,
+        exclude_account_ids=set(),
+        preferred_account_id="acc_owner",
+        require_preferred_account=True,
+    )
+
+    assert result is healed_account
+    emit_connect_failure.assert_not_awaited()
+    assert fail_closed_counter.samples == []
+    assert select_account.await_count == 2
+    healed_call_kwargs = select_account.await_args_list[1].kwargs
+    assert healed_call_kwargs.get("preferred_account_id") is None
+    assert healed_call_kwargs.get("fallback_on_preferred_account_unavailable") is True
+    assert request_state.continuity_self_healed is True
+    assert request_state.proxy_injected_previous_response_id is False
+    assert "continuity_self_heal surface=websocket_connect reason=owner_unavailable" in caplog.text
+    assert self_heal_counter.samples == [
+        {
+            "labels": {"surface": "websocket_connect", "reason": "owner_unavailable"},
+            "value": 1.0,
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_select_websocket_connect_account_owner_unavailable_self_heal_reselection_fails_closed(
+    monkeypatch,
+    caplog,
+):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="ws_req_prev_owner_mismatch_self_heal_fails",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        previous_response_id="resp_prev_owner",
+        preferred_account_id="acc_owner",
+        session_id="turn_ws_owner_mismatch_self_heal_fails",
+        proxy_injected_previous_response_id=True,
+        proxy_injected_anchor_had_full_resend_payload=True,
+        fresh_upstream_request_text='{"type":"response.create"}',
+    )
+    mismatched_account = _make_account("acc_other")
+    fail_closed_counter = _ObservedCounter()
+    self_heal_counter = _ObservedCounter()
+
+    monkeypatch.setattr(proxy_service, "PROMETHEUS_AVAILABLE", True)
+    monkeypatch.setattr(proxy_service, "continuity_fail_closed_total", fail_closed_counter, raising=False)
+    monkeypatch.setattr(proxy_service, "continuity_self_heal_total", self_heal_counter, raising=False)
+    monkeypatch.setattr(
+        proxy_service,
+        "_websocket_request_text_is_account_neutral_fresh_replay",
+        lambda text: True,
+    )
+    select_account = AsyncMock(
+        side_effect=[
+            AccountSelection(account=mismatched_account, error_message=None),
+            AccountSelection(account=None, error_message="No active accounts available", error_code="no_accounts"),
+        ]
+    )
+    monkeypatch.setattr(service, "_select_account_with_budget", select_account)
+    release_account_lease = AsyncMock()
+    monkeypatch.setattr(service._load_balancer, "release_account_lease", release_account_lease)
+    websocket_send = AsyncMock()
+
+    caplog.set_level(logging.WARNING, logger="app.modules.proxy.service")
+    result = await service._select_websocket_connect_account(
+        10_000.0,
+        sticky_key=None,
+        sticky_kind=None,
+        prefer_earlier_reset=False,
+        prefer_earlier_reset_window="secondary",
+        routing_strategy="usage_weighted",
+        model="gpt-5.1",
+        request_state=request_state,
+        api_key=None,
+        client_send_lock=anyio.Lock(),
+        websocket=cast(WebSocket, SimpleNamespace(send_text=websocket_send)),
+        reallocate_sticky=False,
+        sticky_max_age_seconds=None,
+        exclude_account_ids=set(),
+        preferred_account_id="acc_owner",
+        require_preferred_account=True,
+    )
+
+    assert result is None
+    assert select_account.await_count == 2
+    await_args = websocket_send.await_args
+    assert await_args is not None
+    sent_payload = json.loads(await_args.args[0])
+    assert sent_payload["status"] == 502
+    assert sent_payload["error"]["code"] == "previous_response_owner_unavailable"
+    assert "continuity_fail_closed surface=websocket_connect reason=owner_account_unavailable" in caplog.text
+    assert fail_closed_counter.samples == [
+        {
+            "labels": {"surface": "websocket_connect", "reason": "owner_account_unavailable"},
+            "value": 1.0,
+        }
+    ]
+    assert self_heal_counter.samples == [
+        {
+            "labels": {"surface": "websocket_connect", "reason": "owner_unavailable"},
+            "value": 1.0,
+        }
+    ]
+
+
+@pytest.mark.asyncio
 async def test_select_websocket_connect_account_preferred_owner_missing_fails_closed(
     monkeypatch,
     caplog,
@@ -24970,6 +25140,87 @@ async def test_select_websocket_connect_account_preferred_owner_missing_fails_cl
     assert counter.samples == [
         {
             "labels": {"surface": "websocket_connect", "reason": "owner_account_unavailable"},
+            "value": 1.0,
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_select_websocket_connect_account_self_heals_owner_unavailable_for_preferred_owner_missing(
+    monkeypatch,
+    caplog,
+):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="ws_req_prev_owner_missing_self_heal",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        previous_response_id="resp_prev_owner",
+        preferred_account_id="acc_owner",
+        session_id="turn_ws_owner_missing_self_heal",
+        proxy_injected_previous_response_id=True,
+        proxy_injected_anchor_had_full_resend_payload=True,
+        fresh_upstream_request_text='{"type":"response.create"}',
+    )
+    healed_account = _make_account("acc_healed")
+    fail_closed_counter = _ObservedCounter()
+    self_heal_counter = _ObservedCounter()
+
+    monkeypatch.setattr(proxy_service, "PROMETHEUS_AVAILABLE", True)
+    monkeypatch.setattr(proxy_service, "continuity_fail_closed_total", fail_closed_counter, raising=False)
+    monkeypatch.setattr(proxy_service, "continuity_self_heal_total", self_heal_counter, raising=False)
+    monkeypatch.setattr(
+        proxy_service,
+        "_websocket_request_text_is_account_neutral_fresh_replay",
+        lambda text: True,
+    )
+    select_account = AsyncMock(
+        side_effect=[
+            AccountSelection(account=None, error_message="No active accounts available", error_code="no_accounts"),
+            AccountSelection(account=healed_account, error_message=None),
+        ]
+    )
+    monkeypatch.setattr(service, "_select_account_with_budget", select_account)
+    monkeypatch.setattr(service, "_release_websocket_reservation", AsyncMock())
+    emit_connect_failure = AsyncMock()
+    monkeypatch.setattr(service, "_emit_websocket_connect_failure", emit_connect_failure)
+
+    caplog.set_level(logging.WARNING, logger="app.modules.proxy.service")
+    result = await service._select_websocket_connect_account(
+        10_000.0,
+        sticky_key=None,
+        sticky_kind=None,
+        prefer_earlier_reset=False,
+        prefer_earlier_reset_window="secondary",
+        routing_strategy="usage_weighted",
+        model="gpt-5.1",
+        request_state=request_state,
+        api_key=None,
+        client_send_lock=anyio.Lock(),
+        websocket=cast(WebSocket, SimpleNamespace()),
+        reallocate_sticky=False,
+        sticky_max_age_seconds=None,
+        exclude_account_ids=set(),
+        preferred_account_id="acc_owner",
+        require_preferred_account=True,
+    )
+
+    assert result is healed_account
+    emit_connect_failure.assert_not_awaited()
+    assert fail_closed_counter.samples == []
+    assert select_account.await_count == 2
+    healed_call_kwargs = select_account.await_args_list[1].kwargs
+    assert healed_call_kwargs.get("preferred_account_id") is None
+    assert healed_call_kwargs.get("fallback_on_preferred_account_unavailable") is True
+    assert request_state.continuity_self_healed is True
+    assert "continuity_self_heal surface=websocket_connect reason=owner_unavailable" in caplog.text
+    assert self_heal_counter.samples == [
+        {
+            "labels": {"surface": "websocket_connect", "reason": "owner_unavailable"},
             "value": 1.0,
         }
     ]

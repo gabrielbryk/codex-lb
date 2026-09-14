@@ -1748,6 +1748,26 @@ def _websocket_request_can_replay_before_visible_output(
     return precreated_pending or accepted_lifecycle_only_pending
 
 
+def owner_unavailable_allows_proxy_injected_self_heal(request_state: _WebSocketRequestState) -> bool:
+    """Whether a denied proxy-injected continuity anchor may be dropped in
+    place instead of failing the request closed.
+
+    Shared gate between the HTTP-bridge submit path and the WebSocket
+    connect path: true only for a proxy-injected anchor (our own
+    optimization, not something the client asked for) whose pre-injection
+    payload already carried full context on its own, that has not already
+    been healed once for this client request. Callers still must confirm
+    the account-neutral replay check appropriate to their own effective
+    payload/request text before actually healing.
+    """
+    return not (
+        request_state.continuity_self_healed
+        or not request_state.proxy_injected_previous_response_id
+        or not request_state.proxy_injected_anchor_had_full_resend_payload
+        or request_state.fresh_upstream_request_text is None
+    )
+
+
 def _websocket_request_is_accepted_lifecycle_only(request_state: _WebSocketRequestState) -> bool:
     """Return whether upstream accepted the request without producing any output.
 
