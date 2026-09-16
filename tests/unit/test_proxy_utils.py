@@ -34566,7 +34566,7 @@ async def test_proxy_responses_websocket_replays_staged_turn_before_drain_close(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("second_payload", "expected_event_types"),
+    ("second_payload", "failure_stage", "expected_event_types", "expected_degraded", "expected_send_count"),
     [
         pytest.param(
             {
@@ -34576,20 +34576,37 @@ async def test_proxy_responses_websocket_replays_staged_turn_before_drain_close(
                 "input": [{"role": "user", "content": "second"}],
                 "stream": True,
             },
+            "send",
             ["response.created", "response.failed"],
+            True,
+            2,
             id="response-create",
         ),
         pytest.param(
             {"type": "response.cancel"},
+            "send",
             ["response.created"],
+            True,
+            2,
             id="non-create-with-pending-request",
+        ),
+        pytest.param(
+            {"type": "response.cancel"},
+            "pre_send",
+            ["response.created"],
+            False,
+            1,
+            id="pre-send-with-pending-request",
         ),
     ],
 )
 async def test_proxy_responses_websocket_degrades_after_send_failure_with_pending_request(
     monkeypatch,
     second_payload: dict[str, object],
+    failure_stage: str,
     expected_event_types: list[str],
+    expected_degraded: bool,
+    expected_send_count: int,
 ):
     service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
     handle_stream_error = AsyncMock()
@@ -34669,7 +34686,7 @@ async def test_proxy_responses_websocket_degrades_after_send_failure_with_pendin
 
         async def send_text(self, _text: str) -> None:
             self.send_count += 1
-            if self.send_count == 2:
+            if self.send_count == 2 and failure_stage == "send":
                 raise UpstreamWebSocketTransportError(
                     "Codex upstream websocket send failed: OSError",
                     error_code="upstream_unavailable",
@@ -34697,6 +34714,18 @@ async def test_proxy_responses_websocket_degrades_after_send_failure_with_pendin
         "_revalidate_open_websocket_account",
         AsyncMock(side_effect=lambda current_account, **_: (current_account, None, None)),
     )
+    if failure_stage == "pre_send":
+        original_archive_context = websocket_mixin_module._websocket_archive_request_context
+        archive_context_count = 0
+
+        def fail_second_archive_context(request_id: str | None):
+            nonlocal archive_context_count
+            archive_context_count += 1
+            if archive_context_count == 2:
+                raise RuntimeError("application failure before upstream send")
+            return original_archive_context(request_id)
+
+        monkeypatch.setattr(websocket_mixin_module, "_websocket_archive_request_context", fail_second_archive_context)
 
     proxy_support.clear_upstream_websocket_transport_failure()
     try:
@@ -34717,14 +34746,17 @@ async def test_proxy_responses_websocket_degrades_after_send_failure_with_pendin
                 f"closes={downstream.close_calls!r} upstream_sends={upstream.send_count}"
             ) from exc
 
-        assert proxy_support.upstream_websocket_transport_recently_failed() is True
+        assert proxy_support.upstream_websocket_transport_recently_failed() is expected_degraded
     finally:
         proxy_support.clear_upstream_websocket_transport_failure()
 
-    assert upstream.send_count == 2
+    assert upstream.send_count == expected_send_count
     assert [json.loads(text)["type"] for text in downstream.sent_text] == expected_event_types
     assert downstream.close_calls[0] == (1011, "upstream replay requires a fresh request")
-    handle_stream_error.assert_not_awaited()
+    if failure_stage == "pre_send":
+        handle_stream_error.assert_awaited_once()
+    else:
+        handle_stream_error.assert_not_awaited()
 
 
 @pytest.mark.asyncio

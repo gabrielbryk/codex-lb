@@ -2660,6 +2660,7 @@ class _WebSocketMixin:
                         )
                     )
 
+                upstream_send_started = False
                 try:
                     if (
                         text_data is not None
@@ -2799,6 +2800,7 @@ class _WebSocketMixin:
                                 )
                             request_state.response_create_sent_at = clock.monotonic()
                         with _websocket_archive_request_context(archive_request_id):
+                            upstream_send_started = True
                             await upstream.send_text(text_data)
                 except ProxyResponseError as exc:
                     error = _parse_openai_error(exc.payload)
@@ -2836,7 +2838,7 @@ class _WebSocketMixin:
                     degraded_to_http = mark_direct_websocket_post_send_failure(
                         trigger="send_error",
                         route_mode=getattr(upstream, "upstream_proxy_route_mode", None),
-                        sent_pending=sent_pending,
+                        sent_pending=upstream_send_started and sent_pending,
                         error_code=exc.error_code,
                     )
                     if not await quiesce_current_upstream_reader_after_send_failure():
@@ -2908,7 +2910,7 @@ class _WebSocketMixin:
                     degraded_to_http = mark_direct_websocket_post_send_failure(
                         trigger="send_error",
                         route_mode=getattr(upstream, "upstream_proxy_route_mode", None),
-                        sent_pending=sent_pending,
+                        sent_pending=upstream_send_started and sent_pending,
                     )
                     if not await quiesce_current_upstream_reader_after_send_failure():
                         break
