@@ -15,7 +15,7 @@
 
 ## 4. Verification and Rollout
 
-- [ ] 4.1 Run targeted transport, bridge, ownership, settlement, and observability tests
+- [x] 4.1 Run targeted transport, bridge, ownership, settlement, and observability tests
 - [ ] 4.2 Run lint, typecheck, unit, bridge, core integration shards, e2e, strict change/spec validation, and Codex review
 - [ ] 4.3 Complete the unchecked continuity-owner validation tasks without changing its fail-closed ownership behavior
 - [ ] 4.4 Merge to main, deploy only at zero connected clients, and run the controlled auto canary; restore HTTP if evidence is inconclusive

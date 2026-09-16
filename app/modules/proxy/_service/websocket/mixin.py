@@ -2831,10 +2831,12 @@ class _WebSocketMixin:
                     # send_str/send_bytes may fail after handing bytes to the
                     # kernel. Delivery is uncertain, so replay could duplicate
                     # a response.create even when no output is visible yet.
+                    async with pending_lock:
+                        sent_pending = any(pending.response_create_sent_at is not None for pending in pending_requests)
                     degraded_to_http = mark_direct_websocket_post_send_failure(
                         trigger="send_error",
                         route_mode=getattr(upstream, "upstream_proxy_route_mode", None),
-                        sent_pending=request_state is not None and request_state.response_create_sent_at is not None,
+                        sent_pending=sent_pending,
                         error_code=exc.error_code,
                     )
                     if not await quiesce_current_upstream_reader_after_send_failure():
@@ -2901,10 +2903,12 @@ class _WebSocketMixin:
                     account = None
                     continue
                 except Exception:
+                    async with pending_lock:
+                        sent_pending = any(pending.response_create_sent_at is not None for pending in pending_requests)
                     degraded_to_http = mark_direct_websocket_post_send_failure(
                         trigger="send_error",
                         route_mode=getattr(upstream, "upstream_proxy_route_mode", None),
-                        sent_pending=request_state is not None and request_state.response_create_sent_at is not None,
+                        sent_pending=sent_pending,
                     )
                     if not await quiesce_current_upstream_reader_after_send_failure():
                         break

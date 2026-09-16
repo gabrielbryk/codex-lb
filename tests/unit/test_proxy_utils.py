@@ -34565,7 +34565,32 @@ async def test_proxy_responses_websocket_replays_staged_turn_before_drain_close(
 
 
 @pytest.mark.asyncio
-async def test_proxy_responses_websocket_closes_sequenced_client_after_typed_send_failure(monkeypatch):
+@pytest.mark.parametrize(
+    ("second_payload", "expected_event_types"),
+    [
+        pytest.param(
+            {
+                "type": "response.create",
+                "model": "gpt-5.4",
+                "instructions": "",
+                "input": [{"role": "user", "content": "second"}],
+                "stream": True,
+            },
+            ["response.created", "response.failed"],
+            id="response-create",
+        ),
+        pytest.param(
+            {"type": "response.cancel"},
+            ["response.created"],
+            id="non-create-with-pending-request",
+        ),
+    ],
+)
+async def test_proxy_responses_websocket_degrades_after_send_failure_with_pending_request(
+    monkeypatch,
+    second_payload: dict[str, object],
+    expected_event_types: list[str],
+):
     service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
     handle_stream_error = AsyncMock()
     settings = _make_proxy_settings()
@@ -34585,16 +34610,7 @@ async def test_proxy_responses_websocket_closes_sequenced_client_after_typed_sen
         },
         separators=(",", ":"),
     )
-    second_request = json.dumps(
-        {
-            "type": "response.create",
-            "model": "gpt-5.4",
-            "instructions": "",
-            "input": [{"role": "user", "content": "second"}],
-            "stream": True,
-        },
-        separators=(",", ":"),
-    )
+    second_request = json.dumps(second_payload, separators=(",", ":"))
 
     class _SequencedDownstreamWebSocket:
         def __init__(self) -> None:
@@ -34706,10 +34722,7 @@ async def test_proxy_responses_websocket_closes_sequenced_client_after_typed_sen
         proxy_support.clear_upstream_websocket_transport_failure()
 
     assert upstream.send_count == 2
-    assert [json.loads(text)["type"] for text in downstream.sent_text] == [
-        "response.created",
-        "response.failed",
-    ]
+    assert [json.loads(text)["type"] for text in downstream.sent_text] == expected_event_types
     assert downstream.close_calls[0] == (1011, "upstream replay requires a fresh request")
     handle_stream_error.assert_not_awaited()
 
@@ -52649,7 +52662,20 @@ async def test_submit_http_bridge_request_reinlines_final_text(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_submit_http_bridge_direct_ambiguous_send_failure_degrades_and_is_not_replayed(monkeypatch):
+@pytest.mark.parametrize(
+    ("failure_stage", "expected_error_code", "expected_degraded", "expected_penalize"),
+    [
+        pytest.param("send", "upstream_unavailable", True, False, id="ambiguous-send"),
+        pytest.param("inline", "stream_incomplete", False, True, id="pre-send"),
+    ],
+)
+async def test_submit_http_bridge_direct_failure_degrades_only_after_send_starts(
+    monkeypatch,
+    failure_stage: str,
+    expected_error_code: str,
+    expected_degraded: bool,
+    expected_penalize: bool,
+):
     service = proxy_service.ProxyService.__new__(proxy_service.ProxyService)
     service._durable_bridge = None
     proxy_service._initialize_http_bridge_retry_circuit(service)
@@ -52668,7 +52694,7 @@ async def test_submit_http_bridge_direct_ambiguous_send_failure_degrades_and_is_
         "Codex direct upstream websocket send failed: OSError",
         error_code="upstream_unavailable",
     )
-    send_text = AsyncMock(side_effect=send_error)
+    send_text = AsyncMock(side_effect=send_error if failure_stage == "send" else None)
     close = AsyncMock()
     session = proxy_service._HTTPBridgeSession(
         key=proxy_service._HTTPBridgeSessionKey("session_header", "sid-submit-network", None),
@@ -52696,7 +52722,10 @@ async def test_submit_http_bridge_direct_ambiguous_send_failure_degrades_and_is_
 
     fail_pending = AsyncMock()
     reconnect_and_retry = AsyncMock(side_effect=AssertionError("ambiguous send failures must not be replayed"))
-    monkeypatch.setattr(service, "_inline_http_bridge_image_urls", AsyncMock(return_value=request_state.request_text))
+    inline = AsyncMock(return_value=request_state.request_text)
+    if failure_stage == "inline":
+        inline.side_effect = RuntimeError("image inlining failed before dispatch")
+    monkeypatch.setattr(service, "_inline_http_bridge_image_urls", inline)
     monkeypatch.setattr(service, "_maybe_prewarm_http_bridge_session", AsyncMock())
     monkeypatch.setattr(service, "_acquire_request_state_response_create_admission", AsyncMock())
     monkeypatch.setattr(service, "_start_request_state_api_key_reservation_heartbeat", lambda *args, **kwargs: None)
@@ -52714,18 +52743,21 @@ async def test_submit_http_bridge_direct_ambiguous_send_failure_degrades_and_is_
                 queue_limit=1,
             )
 
-        assert proxy_support.upstream_websocket_transport_recently_failed() is True
+        assert proxy_support.upstream_websocket_transport_recently_failed() is expected_degraded
     finally:
         proxy_support.clear_upstream_websocket_transport_failure()
 
-    assert _proxy_error_code(exc_info.value) == "upstream_unavailable"
-    send_text.assert_awaited_once()
+    assert _proxy_error_code(exc_info.value) == expected_error_code
+    if failure_stage == "send":
+        send_text.assert_awaited_once()
+    else:
+        send_text.assert_not_awaited()
     reconnect_and_retry.assert_not_awaited()
-    assert cleanup_observed_closed == [True]
+    assert cleanup_observed_closed == [failure_stage == "send"]
     fail_call = fail_pending.await_args
     assert fail_call is not None
-    assert fail_call.kwargs["error_code"] == "upstream_unavailable"
-    assert fail_call.kwargs["penalize_account"] is False
+    assert fail_call.kwargs["error_code"] == expected_error_code
+    assert fail_call.kwargs["penalize_account"] is expected_penalize
     assert session.closed is True
     close.assert_awaited_once()
 

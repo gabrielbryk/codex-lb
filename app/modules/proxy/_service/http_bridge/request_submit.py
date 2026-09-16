@@ -1719,6 +1719,7 @@ class _HTTPBridgeRequestSubmitMixin:
         gate_acquired = False
         request_enqueued = False
         admission_waiter_registered = False
+        upstream_send_started = False
         try:
             # Register the submit as an admission waiter BEFORE any suspension
             # outside the lock: the waiter count keeps the idle sweeper and
@@ -1921,7 +1922,6 @@ class _HTTPBridgeRequestSubmitMixin:
                         openai_error("upstream_unavailable", "HTTP responses session bridge is closed"),
                     )
                 recovery_receipt: DurableBridgeAliasRegistrationReceipt | None = None
-                upstream_send_started = False
                 try:
                     if recovery_turn_state is not None:
                         registration_cancellation: asyncio.CancelledError | None = None
@@ -2367,7 +2367,7 @@ class _HTTPBridgeRequestSubmitMixin:
             degraded_to_http = mark_direct_websocket_post_send_failure(
                 trigger="send_error",
                 route_mode=session.upstream_proxy_route_mode,
-                sent_pending=True,
+                sent_pending=upstream_send_started,
                 error_code=error_code,
             )
             account_neutral = degraded_to_http or is_account_neutral_websocket_error_code(error_code)
