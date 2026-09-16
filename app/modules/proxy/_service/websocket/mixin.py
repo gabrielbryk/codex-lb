@@ -361,6 +361,7 @@ from app.modules.proxy._service.support import (
     _WebSocketTransientRefreshFailover,
     _WebSocketUpstreamControl,
     clear_upstream_websocket_transport_failure,
+    mark_direct_websocket_post_send_failure,
     mark_upstream_websocket_transport_failure,
     websocket_connect_transport_failure_code,
 )
@@ -1291,10 +1292,16 @@ async def _process_upstream_websocket_transport_end(
     replay_refusal_reasons: list[str] = []
     replay_request_state = None
     message_error_code = getattr(message, "error_code", None)
+    degraded_to_http = mark_direct_websocket_post_send_failure(
+        trigger="receive_close" if getattr(message, "kind", None) == "close" else "receive_error",
+        route_mode=getattr(upstream, "upstream_proxy_route_mode", None),
+        sent_pending=bool(reader_owned) and getattr(message, "kind", None) in {"close", "error"},
+        error_code=message_error_code,
+    )
     # A classified local transport failure says nothing about whether an
     # already-sent response.create was accepted. Keep it account-neutral and
     # terminal: replay here could duplicate work, billing, or tool side effects.
-    account_neutral = is_account_neutral_websocket_error_code(message_error_code)
+    account_neutral = degraded_to_http or is_account_neutral_websocket_error_code(message_error_code)
     if account_neutral:
         if any(state.last_downstream_sequence_number is not None for state in reader_owned):
             replay_refusal_reasons.append("sequenced_downstream_frame")
@@ -2824,6 +2831,12 @@ class _WebSocketMixin:
                     # send_str/send_bytes may fail after handing bytes to the
                     # kernel. Delivery is uncertain, so replay could duplicate
                     # a response.create even when no output is visible yet.
+                    degraded_to_http = mark_direct_websocket_post_send_failure(
+                        trigger="send_error",
+                        route_mode=getattr(upstream, "upstream_proxy_route_mode", None),
+                        sent_pending=request_state is not None and request_state.response_create_sent_at is not None,
+                        error_code=exc.error_code,
+                    )
                     if not await quiesce_current_upstream_reader_after_send_failure():
                         break
                     reader_replay = take_reader_replay_request_state()
@@ -2846,7 +2859,9 @@ class _WebSocketMixin:
                                 client_send_lock=client_send_lock,
                                 response_create_gate=response_create_gate,
                                 downstream_activity=downstream_activity,
-                                penalize_account=not is_account_neutral_websocket_error_code(exc.error_code),
+                                penalize_account=not (
+                                    degraded_to_http or is_account_neutral_websocket_error_code(exc.error_code)
+                                ),
                             ),
                             name="proxy-websocket-finalization-transport-send-failure",
                         )
@@ -2870,7 +2885,9 @@ class _WebSocketMixin:
                         client_send_lock=client_send_lock,
                         response_create_gate=response_create_gate,
                         downstream_activity=downstream_activity,
-                        penalize_account=not is_account_neutral_websocket_error_code(exc.error_code),
+                        penalize_account=not (
+                            degraded_to_http or is_account_neutral_websocket_error_code(exc.error_code)
+                        ),
                         suppress_sequenced_downstream_errors=sequenced_downstream_replay_refused,
                     )
                     if sequenced_downstream_replay_refused:
@@ -2884,6 +2901,11 @@ class _WebSocketMixin:
                     account = None
                     continue
                 except Exception:
+                    degraded_to_http = mark_direct_websocket_post_send_failure(
+                        trigger="send_error",
+                        route_mode=getattr(upstream, "upstream_proxy_route_mode", None),
+                        sent_pending=request_state is not None and request_state.response_create_sent_at is not None,
+                    )
                     if not await quiesce_current_upstream_reader_after_send_failure():
                         break
                     reader_replay = take_reader_replay_request_state()
@@ -2895,7 +2917,7 @@ class _WebSocketMixin:
                             pending_lock=pending_lock,
                             replay_refusal_reasons=replay_refusal_reasons,
                         )
-                    if replay_candidate is not None:
+                    if replay_candidate is not None and not degraded_to_http:
                         replay_request_state = replay_candidate
                         _facade().logger.info(
                             "Transparent websocket replay after upstream send failure request_id=%s",
@@ -2926,6 +2948,7 @@ class _WebSocketMixin:
                         client_send_lock=client_send_lock,
                         response_create_gate=response_create_gate,
                         downstream_activity=downstream_activity,
+                        penalize_account=not degraded_to_http,
                         suppress_sequenced_downstream_errors=sequenced_downstream_replay_refused,
                     )
                     if sequenced_downstream_replay_refused:

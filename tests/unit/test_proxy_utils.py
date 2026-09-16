@@ -34630,6 +34630,7 @@ async def test_proxy_responses_websocket_closes_sequenced_client_after_typed_sen
     class _SecondSendFailsUpstreamWebSocket:
         def __init__(self) -> None:
             self.send_count = 0
+            self.upstream_proxy_route_mode = "direct"
             self.closed = asyncio.Event()
             self.messages: asyncio.Queue[SimpleNamespace] = asyncio.Queue()
             self.messages.put_nowait(
@@ -34655,7 +34656,7 @@ async def test_proxy_responses_websocket_closes_sequenced_client_after_typed_sen
             if self.send_count == 2:
                 raise UpstreamWebSocketTransportError(
                     "Codex upstream websocket send failed: OSError",
-                    error_code="proxy_network_unavailable",
+                    error_code="upstream_unavailable",
                 )
 
         async def send_bytes(self, _data: bytes) -> None:
@@ -34681,22 +34682,28 @@ async def test_proxy_responses_websocket_closes_sequenced_client_after_typed_sen
         AsyncMock(side_effect=lambda current_account, **_: (current_account, None, None)),
     )
 
+    proxy_support.clear_upstream_websocket_transport_failure()
     try:
-        await asyncio.wait_for(
-            service.proxy_responses_websocket(
-                cast(WebSocket, downstream),
-                {},
-                codex_session_affinity=False,
-                openai_cache_affinity=False,
-                api_key=None,
-            ),
-            timeout=1.0,
-        )
-    except TimeoutError as exc:  # pragma: no cover - diagnostic guard
-        raise AssertionError(
-            f"websocket did not terminate: step={downstream.step} sent={downstream.sent_text!r} "
-            f"closes={downstream.close_calls!r} upstream_sends={upstream.send_count}"
-        ) from exc
+        try:
+            await asyncio.wait_for(
+                service.proxy_responses_websocket(
+                    cast(WebSocket, downstream),
+                    {},
+                    codex_session_affinity=False,
+                    openai_cache_affinity=False,
+                    api_key=None,
+                ),
+                timeout=1.0,
+            )
+        except TimeoutError as exc:  # pragma: no cover - diagnostic guard
+            raise AssertionError(
+                f"websocket did not terminate: step={downstream.step} sent={downstream.sent_text!r} "
+                f"closes={downstream.close_calls!r} upstream_sends={upstream.send_count}"
+            ) from exc
+
+        assert proxy_support.upstream_websocket_transport_recently_failed() is True
+    finally:
+        proxy_support.clear_upstream_websocket_transport_failure()
 
     assert upstream.send_count == 2
     assert [json.loads(text)["type"] for text in downstream.sent_text] == [
@@ -52642,7 +52649,7 @@ async def test_submit_http_bridge_request_reinlines_final_text(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_submit_http_bridge_network_send_failure_is_neutral_and_not_replayed(monkeypatch):
+async def test_submit_http_bridge_direct_ambiguous_send_failure_degrades_and_is_not_replayed(monkeypatch):
     service = proxy_service.ProxyService.__new__(proxy_service.ProxyService)
     service._durable_bridge = None
     proxy_service._initialize_http_bridge_retry_circuit(service)
@@ -52658,8 +52665,8 @@ async def test_submit_http_bridge_network_send_failure_is_neutral_and_not_replay
         request_text='{"type":"response.create","model":"gpt-5.5"}',
     )
     send_error = UpstreamWebSocketTransportError(
-        "Codex upstream websocket send failed via proxy endpoint ep_1: OSError",
-        error_code="proxy_network_unavailable",
+        "Codex direct upstream websocket send failed: OSError",
+        error_code="upstream_unavailable",
     )
     send_text = AsyncMock(side_effect=send_error)
     close = AsyncMock()
@@ -52681,6 +52688,7 @@ async def test_submit_http_bridge_network_send_failure_is_neutral_and_not_replay
         last_used_at=0.0,
         idle_ttl_seconds=120.0,
     )
+    session.upstream_proxy_route_mode = "direct"
     cleanup_observed_closed: list[bool] = []
 
     async def cleanup(*_args: object, **_kwargs: object) -> None:
@@ -52696,21 +52704,27 @@ async def test_submit_http_bridge_network_send_failure_is_neutral_and_not_replay
     monkeypatch.setattr(service, "_fail_pending_websocket_requests", fail_pending)
     monkeypatch.setattr(service, "_retry_http_bridge_request_on_fresh_upstream", reconnect_and_retry)
 
-    with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
-        await service._submit_http_bridge_request(
-            session,
-            request_state=request_state,
-            text_data=request_state.request_text or "",
-            queue_limit=1,
-        )
+    proxy_support.clear_upstream_websocket_transport_failure()
+    try:
+        with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
+            await service._submit_http_bridge_request(
+                session,
+                request_state=request_state,
+                text_data=request_state.request_text or "",
+                queue_limit=1,
+            )
 
-    assert _proxy_error_code(exc_info.value) == "proxy_network_unavailable"
+        assert proxy_support.upstream_websocket_transport_recently_failed() is True
+    finally:
+        proxy_support.clear_upstream_websocket_transport_failure()
+
+    assert _proxy_error_code(exc_info.value) == "upstream_unavailable"
     send_text.assert_awaited_once()
     reconnect_and_retry.assert_not_awaited()
     assert cleanup_observed_closed == [True]
     fail_call = fail_pending.await_args
     assert fail_call is not None
-    assert fail_call.kwargs["error_code"] == "proxy_network_unavailable"
+    assert fail_call.kwargs["error_code"] == "upstream_unavailable"
     assert fail_call.kwargs["penalize_account"] is False
     assert session.closed is True
     close.assert_awaited_once()

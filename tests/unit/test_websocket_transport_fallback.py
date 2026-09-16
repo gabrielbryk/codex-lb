@@ -24,11 +24,13 @@ from __future__ import annotations
 import asyncio
 import ssl
 import time
+from collections import deque
 from contextlib import nullcontext
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock
 
+import anyio
 import pytest
 from websockets.datastructures import Headers
 from websockets.exceptions import InvalidStatus
@@ -231,6 +233,129 @@ def test_transport_failure_marker_expires_and_clears() -> None:
     transport_health.mark_upstream_websocket_transport_failure()
     transport_health.clear_upstream_websocket_transport_failure()
     assert transport_health.upstream_websocket_transport_recently_failed() is False
+
+
+@pytest.mark.parametrize("trigger", ["receive_close", "receive_error", "send_error"])
+def test_direct_post_send_transport_failure_arms_marker_and_logs_only_trigger(
+    trigger: str,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level("INFO", logger=transport_health.__name__)
+
+    marked = transport_health.mark_direct_websocket_post_send_failure(
+        trigger=cast(Any, trigger),
+        route_mode="direct",
+        sent_pending=True,
+    )
+
+    assert marked is True
+    assert transport_health.upstream_websocket_transport_recently_failed() is True
+    assert trigger in caplog.text
+    assert "request" not in caplog.text.lower()
+    assert "account" not in caplog.text.lower()
+    assert "credential" not in caplog.text.lower()
+
+
+@pytest.mark.parametrize(
+    ("route_mode", "sent_pending", "error_code"),
+    [
+        pytest.param("account_bound", True, None, id="routed-endpoint"),
+        pytest.param(None, True, None, id="missing-route-provenance"),
+        pytest.param("direct", False, None, id="idle-or-already-terminal"),
+        pytest.param(
+            "direct",
+            True,
+            transport_health.PROCESS_NETWORK_UNAVAILABLE_CODE,
+            id="process-network-loss",
+        ),
+    ],
+)
+def test_direct_post_send_transport_failure_rejects_nonqualifying_evidence(
+    route_mode: str | None,
+    sent_pending: bool,
+    error_code: str | None,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level("INFO", logger=transport_health.__name__)
+
+    marked = transport_health.mark_direct_websocket_post_send_failure(
+        trigger="receive_error",
+        route_mode=route_mode,
+        sent_pending=sent_pending,
+        error_code=error_code,
+    )
+
+    assert marked is False
+    assert transport_health.upstream_websocket_transport_recently_failed() is False
+    assert caplog.text == ""
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("message_kind", "expected_trigger"),
+    [
+        pytest.param("close", "receive_close", id="close"),
+        pytest.param("error", "receive_error", id="error"),
+    ],
+)
+async def test_direct_post_send_receive_failure_is_terminal_neutral_and_not_replayed(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    message_kind: str,
+    expected_trigger: str,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    fail_pending = AsyncMock()
+    monkeypatch.setattr(service, "_fail_pending_websocket_requests", fail_pending)
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req-direct-post-send-failure",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        response_create_sent_at=1.0,
+        awaiting_response_created=True,
+        request_text='{"type":"response.create","input":"test"}',
+    )
+    upstream = SimpleNamespace(
+        upstream_proxy_route_mode="direct",
+        close=AsyncMock(),
+    )
+    upstream_control = proxy_service._WebSocketUpstreamControl()
+    caplog.set_level("INFO", logger=transport_health.__name__)
+
+    should_stop_reader = await ws_mixin._process_upstream_websocket_transport_end(
+        service,
+        cast(Any, SimpleNamespace(send_text=AsyncMock(), close=AsyncMock())),
+        cast(Any, upstream),
+        message=SimpleNamespace(
+            kind=message_kind,
+            text=None,
+            data=None,
+            close_code=1011 if message_kind == "close" else None,
+            error="transport failed" if message_kind == "error" else None,
+            error_code=None,
+        ),
+        account=cast(Any, SimpleNamespace(id="acct-direct-post-send")),
+        account_id_value="acct-direct-post-send",
+        pending_requests=deque([request_state]),
+        pending_lock=anyio.Lock(),
+        client_send_lock=anyio.Lock(),
+        api_key=None,
+        upstream_control=upstream_control,
+        response_create_gate=asyncio.Semaphore(1),
+        downstream_activity=proxy_service._DownstreamWebSocketActivity(),
+    )
+
+    assert should_stop_reader is True
+    assert upstream_control.replay_request_state is None
+    assert transport_health.upstream_websocket_transport_recently_failed() is True
+    assert expected_trigger in caplog.text
+    fail_pending.assert_awaited_once()
+    assert fail_pending.await_args is not None
+    assert fail_pending.await_args.kwargs["penalize_account"] is False
+    upstream.close.assert_awaited_once()
 
 
 @pytest.mark.asyncio

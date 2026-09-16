@@ -186,6 +186,7 @@ from app.modules.proxy._service.support import (
     _request_log_client_fields,
     _websocket_request_can_replay_before_visible_output,
     _WebSocketRequestState,
+    mark_direct_websocket_post_send_failure,
 )
 from app.modules.proxy._service.support import (
     _websocket_route_log_kwargs as _websocket_route_log_kwargs,
@@ -2363,7 +2364,13 @@ class _HTTPBridgeRequestSubmitMixin:
             # Liveness expiry and local network loss are transport failures,
             # not evidence against the selected account. Keep this in sync
             # with the reader path's shared provenance classification.
-            account_neutral = is_account_neutral_websocket_error_code(error_code)
+            degraded_to_http = mark_direct_websocket_post_send_failure(
+                trigger="send_error",
+                route_mode=session.upstream_proxy_route_mode,
+                sent_pending=True,
+                error_code=error_code,
+            )
+            account_neutral = degraded_to_http or is_account_neutral_websocket_error_code(error_code)
             if error_code == UPSTREAM_WEBSOCKET_LIVENESS_TIMEOUT_CODE:
                 # The sender claimed ownership beside the failing send while
                 # holding lifecycle_lock. It therefore owns the entire session
