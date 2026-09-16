@@ -179,6 +179,7 @@ from app.modules.proxy._service.support import (
     _websocket_should_defer_reasoning_prelude,
     _WebSocketReceiveTimeout,
     _WebSocketRequestState,
+    mark_direct_websocket_post_send_failure,
 )
 from app.modules.proxy._service.support import (
     _websocket_route_log_kwargs as _websocket_route_log_kwargs,
@@ -2339,6 +2340,9 @@ class _HTTPBridgeUpstreamEventsMixin:
                             tuple(session.pending_requests)
                         )
                     )
+                    sent_pending = any(
+                        request_state.response_create_sent_at is not None for request_state in session.pending_requests
+                    )
                 _archive_http_bridge_upstream_message(session, message, archive_request_state)
                 session.last_upstream_close_generation += 1
                 session.last_upstream_close_code = message.close_code
@@ -2348,7 +2352,13 @@ class _HTTPBridgeUpstreamEventsMixin:
                 # executing, so replay could duplicate work, billing, or tool
                 # side effects. Clean closes remain eligible for the bounded
                 # pre-created retry circuit maintained by the session.
-                account_neutral = is_account_neutral_websocket_error_code(message.error_code)
+                degraded_to_http = mark_direct_websocket_post_send_failure(
+                    trigger="receive_close" if message.kind == "close" else "receive_error",
+                    route_mode=session.upstream_proxy_route_mode,
+                    sent_pending=sent_pending and message.kind in {"close", "error"},
+                    error_code=message.error_code,
+                )
+                account_neutral = degraded_to_http or is_account_neutral_websocket_error_code(message.error_code)
                 # Only a terminal transport message (close or error) may replay
                 # an accepted turn: a protocol-invalid binary frame did not end
                 # the socket, so it keeps the pre-created retry semantics only.

@@ -31964,6 +31964,61 @@ async def test_http_bridge_reader_maps_ordinary_websocket_receive_failure_to_str
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "message",
+    [
+        pytest.param(UpstreamWebSocketMessage(kind="close", close_code=1011), id="close"),
+        pytest.param(UpstreamWebSocketMessage(kind="error", error="upstream reset"), id="error"),
+    ],
+)
+async def test_http_bridge_direct_post_send_receive_failure_degrades_without_replay_or_penalty(
+    monkeypatch: pytest.MonkeyPatch,
+    message: UpstreamWebSocketMessage,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    request_state = _make_eventless_http_bridge_owner()
+    session = _make_bridge_session(
+        key_value="bridge-direct-post-send-failure",
+        pending_requests=deque([request_state]),
+        queued_request_count=1,
+    )
+    session.upstream_proxy_route_mode = "direct"
+    session.upstream = cast(
+        UpstreamWebSocket,
+        SimpleNamespace(
+            receive=AsyncMock(return_value=message),
+            close=AsyncMock(),
+        ),
+    )
+    retry_precreated = AsyncMock(return_value=True)
+    failure_calls: list[dict[str, object]] = []
+
+    async def fail_reader(
+        target_session: proxy_service._HTTPBridgeSession,
+        **kwargs: object,
+    ) -> bool:
+        assert target_session is session
+        failure_calls.append(dict(kwargs))
+        target_session.closed = True
+        return True
+
+    proxy_support_module.clear_upstream_websocket_transport_failure()
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
+    monkeypatch.setattr(service, "_retry_http_bridge_precreated_request", retry_precreated)
+    monkeypatch.setattr(service, "_fail_http_bridge_reader_and_maybe_retire", fail_reader)
+    try:
+        await service._relay_http_bridge_upstream_messages(session)
+
+        assert proxy_support_module.upstream_websocket_transport_recently_failed() is True
+        retry_precreated.assert_not_awaited()
+        assert len(failure_calls) == 1
+        assert failure_calls[0]["penalize_account"] is False
+        assert failure_calls[0]["error_code"] == "stream_incomplete"
+    finally:
+        proxy_support_module.clear_upstream_websocket_transport_failure()
+
+
+@pytest.mark.asyncio
 async def test_http_bridge_abrupt_eventless_drop_stays_account_neutral_and_records_drop_signal(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -8257,12 +8257,17 @@ async def _stream_response_error_events(
             default_status=exc.status_code,
         )
         error = envelope.error
-        if preserve_native_failure_lifecycle and not local_refusal and error_code in {
-            "stream_incomplete",
-            "stream_idle_timeout",
-            "upstream_request_timeout",
-            "upstream_unavailable",
-        }:
+        if (
+            preserve_native_failure_lifecycle
+            and not local_refusal
+            and error_code
+            in {
+                "stream_incomplete",
+                "stream_idle_timeout",
+                "upstream_request_timeout",
+                "upstream_unavailable",
+            }
+        ):
             # codex-lb has already given up (internal retries/replays are
             # exhausted). Starlette already sent the 200, so the only way to
             # tell a native Codex client anything is a terminal SSE event on

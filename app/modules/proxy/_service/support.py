@@ -2113,6 +2113,26 @@ def mark_upstream_websocket_transport_failure() -> None:
     _upstream_ws_transport_failure_at = time.monotonic()
 
 
+def mark_direct_websocket_post_send_failure(
+    *,
+    trigger: Literal["receive_close", "receive_error", "send_error"],
+    route_mode: str | None,
+    sent_pending: bool,
+    error_code: str | None = None,
+) -> bool:
+    """Arm HTTP degradation for direct, ambiguous post-send transport loss.
+
+    Callers retain settlement ownership.  This helper deliberately changes no
+    request, reservation, account-health, or continuity state.
+    """
+
+    if route_mode != "direct" or not sent_pending or error_code == PROCESS_NETWORK_UNAVAILABLE_CODE:
+        return False
+    mark_upstream_websocket_transport_failure()
+    logger.info("Direct upstream websocket post-send failure armed HTTP degradation trigger=%s", trigger)
+    return True
+
+
 def clear_upstream_websocket_transport_failure() -> None:
     global _upstream_ws_transport_failure_at
     _upstream_ws_transport_failure_at = None
