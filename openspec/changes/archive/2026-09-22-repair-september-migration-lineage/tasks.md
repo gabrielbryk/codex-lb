@@ -1,0 +1,4 @@
+- [x] Add a no-op merge revision joining the SCIM and overflow-retirement revisions without changing either existing revision.
+- [x] Update topology validation to allow the same-prefix pair only after an explicit merge, and cover unresolved, chained, and merged cases.
+- [x] Add an integration check that upgrades from either branch to one head with the expected final schema.
+- [x] Run migration topology, strict OpenSpec validation, and focused migration tests.

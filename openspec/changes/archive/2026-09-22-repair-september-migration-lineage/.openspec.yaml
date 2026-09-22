@@ -1,0 +1,4 @@
+schema: spec-driven
+created: 2026-09-22
+goal: Restore one valid Alembic upgrade head while preserving both merged
+  revision IDs and their schema operations.

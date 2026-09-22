@@ -27,10 +27,10 @@ Checks:
    counts cannot see, minus the database: ``make lint`` on a branch that is
    merged/rebased onto current ``main`` fails before the push.
 2. No two revisions share a ``YYYYMMDD_HHMMSS`` timestamp prefix (error,
-   ratcheted -- see ``RATCHET_PREFIX``). The collision is the authoring-time
-   fingerprint of the incident: two authors picking the same slot means either
-   the graph forks (different parents) or filename order no longer implies
-   graph order (chained). The message names both revisions with their
+   ratcheted -- see ``RATCHET_PREFIX``), except incomparable revisions whose
+   histories are both joined by an explicit merge revision. An unresolved
+   collision means the graph forks; a chained collision means filename order
+   no longer implies graph order. The message names both revisions with their
    ``down_revision``s so the fork is visible without opening the files.
 3. A revision's id matches its filename stem and the shared revision-id format
    (error, whole history). Mirrors the runtime policy's
@@ -351,6 +351,27 @@ def _group_is_chained(group: Sequence[Revision], parents: Mapping[str, tuple[str
     )
 
 
+def _group_has_explicit_merge(
+    group: Sequence[Revision],
+    revisions: Sequence[Revision],
+    parents: Mapping[str, tuple[str, ...]],
+) -> bool:
+    """True when incomparable colliding revisions converge at an explicit merge."""
+    ancestors = {revision.revision: _ancestors(revision.revision, parents) for revision in group}
+    for index, left in enumerate(group):
+        for right in group[index + 1 :]:
+            if left.revision in ancestors[right.revision] or right.revision in ancestors[left.revision]:
+                return False
+
+    for candidate in revisions:
+        if len(candidate.down_revisions) < 2:
+            continue
+        candidate_ancestors = _ancestors(candidate.revision, parents)
+        if all(revision.revision in candidate_ancestors for revision in group):
+            return True
+    return False
+
+
 def check_timestamp_prefix_collisions(revisions: Sequence[Revision], ratchet_prefix: str = RATCHET_PREFIX) -> Report:
     """Two revisions in the same timestamp slot: the incident's authoring-time fingerprint."""
     report = Report()
@@ -366,6 +387,8 @@ def check_timestamp_prefix_collisions(revisions: Sequence[Revision], ratchet_pre
         if not _ratcheted((prefix,), ratchet_prefix):
             continue
         group = sorted(group, key=lambda item: item.revision)
+        if _group_has_explicit_merge(group, revisions, parents):
+            continue
         described = "; ".join(revision.describe() for revision in group)
         forked = not _group_is_chained(group, parents)
         consequence = (
@@ -377,8 +400,10 @@ def check_timestamp_prefix_collisions(revisions: Sequence[Revision], ratchet_pre
         report.error(
             f"alembic_timestamp_prefix_collision prefix={prefix} count={len(group)}: {described}. "
             f"{len(group)} revisions took the same timestamp slot, which means they were authored in parallel: "
-            f"{consequence}. Re-stamp the newer revision with a fresh <YYYYMMDD>_<HHMMSS> "
-            "(scripts/rewrite_alembic_revisions.py) and re-point its down_revision at the current head."
+            f"{consequence}. Before merge or deployment, re-stamp the newer revision with a fresh "
+            "<YYYYMMDD>_<HHMMSS> (scripts/rewrite_alembic_revisions.py) and re-point its down_revision "
+            "at the current head; if both histories are already merged, preserve their IDs and add an "
+            "explicit merge revision."
         )
     return report
 
