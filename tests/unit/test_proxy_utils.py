@@ -432,6 +432,109 @@ def test_is_model_scoped_upstream_rejection(message: str | None, expected: bool)
     assert proxy_helpers_module.is_model_scoped_upstream_rejection(message) is expected
 
 
+_MODEL_ACCESS_DENIED_MESSAGE = "The model `gpt-6-sol` does not exist or you do not have access to it."
+_GPT_6_SOL_ENTITLEMENT_MESSAGE = "The 'gpt-6-sol' model is not supported when using Codex with a ChatGPT account."
+
+
+@pytest.mark.parametrize(
+    ("code", "http_status", "message", "expected"),
+    [
+        ("model_not_found", 404, _MODEL_ACCESS_DENIED_MESSAGE, True),
+        ("model_not_found", None, _MODEL_ACCESS_DENIED_MESSAGE, True),
+        ("model_not_found", 404, "The model `gpt-6-sol` does not exist\n  or you do not have access to it.", True),
+        # The generic wording alone is not enough: the code is required.
+        ("invalid_request_error", 404, _MODEL_ACCESS_DENIED_MESSAGE, False),
+        ("upstream_error", None, _MODEL_ACCESS_DENIED_MESSAGE, False),
+        # A known status other than 404 keeps its account-health handling.
+        ("model_not_found", 400, _MODEL_ACCESS_DENIED_MESSAGE, False),
+        ("model_not_found", 500, _MODEL_ACCESS_DENIED_MESSAGE, False),
+        ("model_not_found", 404, "Model not found", False),
+        ("model_not_found", 404, None, False),
+    ],
+)
+def test_is_model_access_denied_rejection(
+    code: str,
+    http_status: int | None,
+    message: str | None,
+    expected: bool,
+) -> None:
+    assert (
+        proxy_helpers_module.is_model_access_denied_rejection(code=code, http_status=http_status, message=message)
+        is expected
+    )
+
+
+@pytest.mark.parametrize(
+    ("code", "message", "expected"),
+    [
+        ("model_not_found", _MODEL_ACCESS_DENIED_MESSAGE, True),
+        ("invalid_request_error", _GPT_6_SOL_ENTITLEMENT_MESSAGE, True),
+        # The quoted model must be the requested model.
+        ("model_not_found", "The model `gpt-6-luna` does not exist or you do not have access to it.", False),
+        # Each message only counts under its own code.
+        ("invalid_request_error", _MODEL_ACCESS_DENIED_MESSAGE, False),
+        ("model_not_found", _GPT_6_SOL_ENTITLEMENT_MESSAGE, False),
+        ("model_not_found", None, False),
+    ],
+)
+def test_is_account_model_unsupported_error_matches_both_envelopes(
+    code: str,
+    message: str | None,
+    expected: bool,
+) -> None:
+    assert (
+        proxy_helpers_module._is_account_model_unsupported_error(code=code, message=message, model="gpt-6-sol")
+        is expected
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("http_status", [None, 404])
+async def test_model_access_denied_rejection_does_not_penalize_account(http_status: int | None) -> None:
+    load_balancer = SimpleNamespace(
+        record_error=AsyncMock(),
+        mark_rate_limit=AsyncMock(),
+        mark_quota_exceeded=AsyncMock(),
+        mark_permanent_failure=AsyncMock(),
+    )
+    proxy = SimpleNamespace(_load_balancer=load_balancer)
+
+    await streaming_helpers_module._handle_stream_error(
+        proxy,
+        cast(Account, SimpleNamespace(id="acc-1")),
+        {"message": _MODEL_ACCESS_DENIED_MESSAGE},
+        "model_not_found",
+        http_status,
+    )
+
+    load_balancer.record_error.assert_not_awaited()
+    load_balancer.mark_rate_limit.assert_not_awaited()
+    load_balancer.mark_quota_exceeded.assert_not_awaited()
+    load_balancer.mark_permanent_failure.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_model_access_denied_message_under_other_code_still_penalizes_account() -> None:
+    """Negative control: the generic wording under another code keeps penalizing."""
+    load_balancer = SimpleNamespace(
+        record_error=AsyncMock(),
+        mark_rate_limit=AsyncMock(),
+        mark_quota_exceeded=AsyncMock(),
+        mark_permanent_failure=AsyncMock(),
+    )
+    proxy = SimpleNamespace(_load_balancer=load_balancer)
+
+    await streaming_helpers_module._handle_stream_error(
+        proxy,
+        cast(Account, SimpleNamespace(id="acc-1")),
+        {"message": _MODEL_ACCESS_DENIED_MESSAGE},
+        "upstream_error",
+        None,
+    )
+
+    load_balancer.record_error.assert_awaited_once()
+
+
 @pytest.mark.parametrize(
     ("code", "expected_failure_class"),
     [

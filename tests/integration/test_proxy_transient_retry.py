@@ -1132,6 +1132,83 @@ async def test_stream_model_entitlement_rejection_keeps_account_health_after_fai
         )
 
 
+_MODEL_ACCESS_DENIED_MESSAGE = "The model `gpt-5.1` does not exist or you do not have access to it."
+
+
+def _model_access_denied_error() -> ProxyResponseError:
+    return ProxyResponseError(
+        404,
+        openai_error("model_not_found", _MODEL_ACCESS_DENIED_MESSAGE, error_type="invalid_request_error"),
+        failure_phase="status",
+    )
+
+
+@pytest.mark.asyncio
+async def test_stream_model_access_denied_fails_over_without_account_penalty(async_client, monkeypatch):
+    """Routed regression: a 404 ``model_not_found`` for an advertised model moves to another account.
+
+    Mirrors the gpt-6-sol launch incident: upstream denied the model to one
+    account while its model list still advertised it, and the proxy surfaced the
+    404 instead of trying an account that could serve it.
+    """
+    imported_ids = {
+        "acc_denied_a": await _import_account(async_client, "acc_denied_a", "denied_a@example.com"),
+        "acc_denied_b": await _import_account(async_client, "acc_denied_b", "denied_b@example.com"),
+    }
+
+    seen_account_ids: list[str | None] = []
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        seen_account_ids.append(account_id)
+        if len(seen_account_ids) == 1:
+            raise _model_access_denied_error()
+        yield _success_sse_event("resp_model_access_denied_ok")
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    payload = {"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True}
+    async with async_client.stream("POST", "/backend-api/codex/responses", json=payload) as resp:
+        assert resp.status_code == 200
+        lines = [line async for line in resp.aiter_lines() if line]
+
+    events = _extract_events(lines)
+    assert [e["type"] for e in events if e.get("type") == "response.completed"] == ["response.completed"]
+    assert len(seen_account_ids) == 2
+    assert seen_account_ids[0] != seen_account_ids[1]
+
+    from app.dependencies import get_proxy_service_for_app
+
+    service = get_proxy_service_for_app(async_client._transport.app)
+    runtime = service._load_balancer._runtime.get(imported_ids[seen_account_ids[0]])
+    assert runtime is None or runtime.error_count == 0
+    assert runtime is None or runtime.last_error_at is None
+
+
+@pytest.mark.asyncio
+async def test_stream_model_access_denied_without_replacement_surfaces_original_404(async_client, monkeypatch):
+    """With no other account, the client gets upstream's 404 unchanged."""
+    await _import_account(async_client, "acc_denied_only", "denied_only@example.com")
+
+    seen_account_ids: list[str | None] = []
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        seen_account_ids.append(account_id)
+        raise _model_access_denied_error()
+        yield  # pragma: no cover - makes this an async generator
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    payload = {"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True}
+    async with async_client.stream("POST", "/backend-api/codex/responses", json=payload) as resp:
+        assert resp.status_code == 404
+        await resp.aread()
+        body = resp.json()
+
+    assert body["error"]["code"] == "model_not_found"
+    assert body["error"]["message"] == _MODEL_ACCESS_DENIED_MESSAGE
+    assert seen_account_ids == ["acc_denied_only"]
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("status_code", [None, 400, 500])
 async def test_stream_safety_policy_rejection_keeps_account_health_and_original_failure(

@@ -63,6 +63,11 @@ _SAFETY_BLOCK_MESSAGE_PREFIX = "This request was blocked by our safety systems."
 _MODEL_UNSUPPORTED_MESSAGE_RE = re.compile(
     r"^The '.+' model is not supported when using Codex with a ChatGPT account\.$"
 )
+# Upstream's other "this account may not use this model" envelope: HTTP 404
+# ``model_not_found`` while the account's own model list still advertises the
+# model (observed on team-plan accounts when ``gpt-6-sol`` launched).
+_MODEL_ACCESS_DENIED_CODE = "model_not_found"
+_MODEL_ACCESS_DENIED_MESSAGE_RE = re.compile(r"^The model `.+` does not exist or you do not have access to it\.$")
 
 
 def is_account_neutral_safety_policy_rejection(
@@ -100,18 +105,42 @@ def is_model_scoped_upstream_rejection(message: str | None) -> bool:
     return _MODEL_UNSUPPORTED_MESSAGE_RE.fullmatch(" ".join(message.split())) is not None
 
 
+def is_model_access_denied_rejection(
+    *,
+    code: str | None,
+    http_status: int | None,
+    message: str | None,
+) -> bool:
+    """Match the 404 ``model_not_found`` model-access rejection for *any* model.
+
+    Like the entitlement rejection it names the model, not the account, so it
+    stays out of account health. The code is required (the message alone is
+    upstream's generic wording) and a known status must be 404.
+    """
+    if code != _MODEL_ACCESS_DENIED_CODE or http_status not in (None, 404) or message is None:
+        return False
+    return _MODEL_ACCESS_DENIED_MESSAGE_RE.fullmatch(" ".join(message.split())) is not None
+
+
 def _is_account_model_unsupported_error(
     *,
     code: str | None,
     message: str | None,
     model: str | None,
 ) -> bool:
-    """Match only the account-entitlement rejection for the requested model."""
-    if code != "invalid_request_error" or message is None or model is None:
+    """Match only an account/model rejection for the requested model.
+
+    Two envelopes qualify: the 400 ``invalid_request_error`` entitlement
+    rejection and the 404 ``model_not_found`` model-access rejection.
+    """
+    if message is None or model is None:
         return False
     normalized_message = " ".join(message.split())
-    expected_message = f"The '{model}' model is not supported when using Codex with a ChatGPT account."
-    return normalized_message == expected_message
+    if code == "invalid_request_error":
+        return normalized_message == f"The '{model}' model is not supported when using Codex with a ChatGPT account."
+    if code == _MODEL_ACCESS_DENIED_CODE:
+        return normalized_message == f"The model `{model}` does not exist or you do not have access to it."
+    return False
 
 
 def is_upstream_model_capacity_error(message: str | None) -> bool:

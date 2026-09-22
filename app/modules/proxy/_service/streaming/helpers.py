@@ -415,6 +415,7 @@ from app.modules.proxy.helpers import (
     _normalize_error_code,
     classify_upstream_failure,
     is_account_neutral_safety_policy_rejection,
+    is_model_access_denied_rejection,
     is_model_scoped_upstream_rejection,
     is_upstream_model_capacity_error,
     is_upstream_usage_limit_rejection,
@@ -1100,6 +1101,7 @@ def _is_account_neutral_request_rejection(
 
 def _is_model_scoped_rejection(
     *,
+    code: str | None,
     http_status: int | None,
     message: str | None,
 ) -> bool:
@@ -1122,7 +1124,12 @@ def _is_model_scoped_rejection(
     rejection with neither ``code`` nor ``type`` on the streaming path, which
     normalizes to ``upstream_error``; on other paths it arrives as
     ``invalid_request_error``. Only the exact message shape decides membership.
+
+    The 404 ``model_not_found`` model-access rejection is the same statement in
+    a different envelope and is matched by its code, message, and 404 status.
     """
+    if is_model_access_denied_rejection(code=code, http_status=http_status, message=message):
+        return True
     if http_status is not None and http_status != 400:
         return False
     return is_model_scoped_upstream_rejection(message)
@@ -1200,6 +1207,7 @@ async def _handle_stream_error(
         )
         return classified
     if _is_model_scoped_rejection(
+        code=code,
         http_status=http_status,
         message=error.get("message"),
     ):
