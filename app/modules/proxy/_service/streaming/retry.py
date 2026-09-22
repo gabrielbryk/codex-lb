@@ -1308,7 +1308,7 @@ class _StreamingRetryMixin:
             *,
             outcome: str,
         ) -> bool | None:
-            nonlocal affinity, current_account_lease
+            nonlocal affinity, current_account_lease, payload_replay_required_account_id
             nonlocal account_model_replay_attempted
             nonlocal last_account_model_rejection, last_account_model_rejection_account_id
             error = _parse_openai_error(exc.payload)
@@ -1346,6 +1346,11 @@ class _StreamingRetryMixin:
                 _ACCOUNT_MODEL_UNSUPPORTED_ERROR_CODE,
             )
             account_model_replay_attempted = True
+            # Upstream refused the model before running the request, so this
+            # dispatch created no state on the rejecting account. Continuation
+            # owners are still enforced through require_preferred_account above.
+            if payload_replay_required_account_id == account.id:
+                payload_replay_required_account_id = None
             last_account_model_rejection = exc
             last_account_model_rejection_account_id = account.id
             await _release_tracked_stream_lease(current_account_lease)

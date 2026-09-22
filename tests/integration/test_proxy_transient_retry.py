@@ -1166,7 +1166,15 @@ async def test_stream_model_access_denied_fails_over_without_account_penalty(asy
 
     monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
 
-    payload = {"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True}
+    # Real Codex bodies are never account-neutral (``reasoning.context`` here),
+    # so the first dispatch pins the payload to the rejecting account.
+    payload = {
+        "model": "gpt-5.1",
+        "instructions": "hi",
+        "input": [{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]}],
+        "reasoning": {"effort": "low", "context": "all_turns"},
+        "stream": True,
+    }
     async with async_client.stream("POST", "/backend-api/codex/responses", json=payload) as resp:
         assert resp.status_code == 200
         lines = [line async for line in resp.aiter_lines() if line]
